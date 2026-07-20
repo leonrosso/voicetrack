@@ -3,7 +3,8 @@ import {
   Settings, X, RefreshCw, SlidersHorizontal,
   Beef, Wheat, Droplet, Mic, AlertCircle, Check, UtensilsCrossed,
   LayoutGrid, Volume2, Loader2, MessageCircleQuestion,
-  ChevronLeft, ChevronRight, Send, ScanLine, Camera
+  ChevronLeft, ChevronRight, Send, ScanLine, Camera,
+  Pencil, Trash2
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
@@ -160,6 +161,18 @@ export default function VoiceTrackDashboard() {
   const [historyMeals, setHistoryMeals] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  // Bump per rieseguire il loader dei giorni passati dopo edit/delete (§5.2 del piano).
+  const [historyTick, setHistoryTick] = useState(0);
+
+  // --- Edit / delete pasti (Deploy 5 §7.2) ---
+  const [editingId, setEditingId] = useState(null);        // id del pasto col pannello aperto
+  const [editDraft, setEditDraft] = useState(null);        // { alimento, grammi, kcal, proteine, carboidrati, grassi }
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id in attesa di conferma
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [swipeId, setSwipeId] = useState(null);            // riga trascinata
+  const [swipeX, setSwipeX] = useState(0);                 // offset corrente (px, ≤ 0)
 
   const POLL_MS = 20000; // refresh dati ogni 20s mentre l'app e' aperta e visibile
 
@@ -806,7 +819,10 @@ export default function VoiceTrackDashboard() {
         const json = await res.json().catch(() => null);
         if (!res.ok || !json) throw new Error(`Risposta ${res.status} dal server`);
         if (!cancelled) {
-          setHistoryMeals((json.dettaglio || []).map((m, i) => ({ id: i + 1, ...m })));
+          // Preserva l'id reale (UUID) della riga per edit/delete; le righe
+          // storiche senza id ricevono un fallback "legacy-N" (non editabile,
+          // ma key React univoca). §5.4 del piano.
+          setHistoryMeals((json.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` })));
         }
       } catch (e) {
         if (!cancelled) {
@@ -818,9 +834,152 @@ export default function VoiceTrackDashboard() {
       }
     })();
     return () => { cancelled = true; };
-  }, [dayOffset, selectedDateStr, config.apiUrl, config.apiKey]);
+  }, [dayOffset, selectedDateStr, config.apiUrl, config.apiKey, historyTick]);
 
   const displayedMeals = dayOffset === 0 ? meals : historyMeals;
+
+  // =========================================================================
+  // Edit / delete di un pasto (Deploy 5 §7.2)
+  // Endpoint /update_meal e /delete_meal, stessa API key + header degli altri.
+  // Editabile solo in modalita' live e su righe con id reale (le "legacy-*"
+  // sono righe storiche senza UUID: il backend risponde 404, quindi niente
+  // affordance). §5.3 del piano.
+  // =========================================================================
+  const isEditable = useCallback(
+    (m) => !!config.apiUrl && !!m && !String(m.id).startsWith('legacy-'),
+    [config.apiUrl]
+  );
+
+  // Ricarica il giorno mostrato dopo una mutazione: oggi via fetchLive (che
+  // riscrive anche vt-cache), i giorni passati bumpando historyTick.
+  const refreshDay = useCallback(() => {
+    if (dayOffset === 0) {
+      fetchLive(config, true);
+    } else {
+      setHistoryTick((t) => t + 1);
+    }
+  }, [dayOffset, config, fetchLive]);
+
+  const openEdit = useCallback((m) => {
+    setSwipeId(null);
+    setSwipeX(0);
+    setConfirmDeleteId(null);
+    setEditError('');
+    setEditingId(m.id);
+    setEditDraft({
+      alimento: m.alimento ?? '',
+      grammi: m.grammi ?? 0,
+      kcal: m.kcal ?? 0,
+      proteine: m.proteine ?? 0,
+      carboidrati: m.carboidrati ?? 0,
+      grassi: m.grassi ?? 0,
+    });
+  }, []);
+
+  const closeEdit = useCallback(() => {
+    setEditingId(null);
+    setEditDraft(null);
+    setEditError('');
+  }, []);
+
+  const num = (v) => {
+    const n = parseFloat(String(v).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const saveEdit = useCallback(async (meal) => {
+    if (!editDraft || editBusy) return;
+    setEditBusy(true);
+    setEditError('');
+    try {
+      const base = config.apiUrl.replace(/\/$/, '');
+      const res = await fetch(`${base}/update_meal`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
+        },
+        body: JSON.stringify({
+          id: meal.id,
+          alimento: String(editDraft.alimento || '').trim(),
+          grammi: num(editDraft.grammi),
+          kcal: num(editDraft.kcal),
+          proteine: num(editDraft.proteine),
+          carboidrati: num(editDraft.carboidrati),
+          grassi: num(editDraft.grassi),
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || json.status !== 'ok') {
+        throw new Error((json && (json.message || json.status)) || `Risposta ${res.status} dal server`);
+      }
+      closeEdit();
+      refreshDay();
+    } catch (e) {
+      setEditError(e.message || 'Impossibile salvare la modifica');
+    } finally {
+      setEditBusy(false);
+    }
+  }, [editDraft, editBusy, config, closeEdit, refreshDay]);
+
+  const deleteMeal = useCallback(async (meal) => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    setEditError('');
+    try {
+      const base = config.apiUrl.replace(/\/$/, '');
+      const res = await fetch(`${base}/delete_meal`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
+        },
+        body: JSON.stringify({ id: meal.id }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || json.status !== 'ok') {
+        throw new Error((json && (json.message || json.status)) || `Risposta ${res.status} dal server`);
+      }
+      setConfirmDeleteId(null);
+      setSwipeId(null);
+      setSwipeX(0);
+      if (editingId === meal.id) closeEdit();
+      refreshDay();
+    } catch (e) {
+      setEditError(e.message || 'Impossibile eliminare il pasto');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [deleteBusy, config, editingId, closeEdit, refreshDay]);
+
+  // --- Swipe-to-delete: drag orizzontale sulla riga (§5.5 del piano) ---
+  const SWIPE_MAX = 80;      // apertura massima (px)
+  const SWIPE_TRIGGER = 48;  // soglia oltre cui si rivela il pulsante elimina
+  const swipeStartXRef = useRef(0);
+
+  const onRowTouchStart = useCallback((m, e) => {
+    if (!isEditable(m) || confirmDeleteId) return;
+    swipeStartXRef.current = e.touches[0].clientX;
+    setSwipeId(m.id);
+  }, [isEditable, confirmDeleteId]);
+
+  const onRowTouchMove = useCallback((m, e) => {
+    if (swipeId !== m.id) return;
+    const dx = e.touches[0].clientX - swipeStartXRef.current;
+    // Solo trascinamento verso sinistra, clampato in [-SWIPE_MAX, 0].
+    setSwipeX(Math.max(-SWIPE_MAX, Math.min(0, dx)));
+  }, [swipeId]);
+
+  const onRowTouchEnd = useCallback((m) => {
+    if (swipeId !== m.id) return;
+    if (swipeX <= -SWIPE_TRIGGER) {
+      // Oltre soglia: la riga torna a posto e compare il box di conferma
+      // (stesso percorso del pulsante Elimina nel pannello).
+      setConfirmDeleteId(m.id);
+    }
+    setSwipeX(0);
+    setSwipeId(null);
+  }, [swipeId, swipeX]);
 
   const totals = useMemo(() => sumTotals(displayedMeals), [displayedMeals]);
   const grouped = useMemo(() => groupByPasto(displayedMeals), [displayedMeals]);
@@ -1076,17 +1235,29 @@ export default function VoiceTrackDashboard() {
                     {PASTO_LABEL[g.pasto] || g.pasto}
                   </div>
                   {g.items.map((m) => (
-                    <div key={m.id} className="flex items-center justify-between" style={{ padding: '6px 0', borderTop: `1px solid ${C.line}` }}>
-                      <div className="flex flex-col">
-                        <span style={{ fontSize: '13px' }}>{m.alimento}</span>
-                        <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
-                          {m.time} · {m.grammi}g · {String(m.fonte || '').includes('barcode') ? 'barcode' : m.fonte === 'pwa-testo' ? 'testo' : 'voce'}
-                        </span>
-                      </div>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color: C.inkMuted, flexShrink: 0, paddingLeft: '10px' }}>
-                        {Math.round(m.kcal)}
-                      </span>
-                    </div>
+                    <MealRow
+                      key={m.id}
+                      meal={m}
+                      editable={isEditable(m)}
+                      isEditing={editingId === m.id}
+                      confirming={confirmDeleteId === m.id}
+                      active={swipeId === m.id}
+                      swipeX={swipeId === m.id ? swipeX : 0}
+                      editDraft={editDraft}
+                      setEditDraft={setEditDraft}
+                      editBusy={editBusy}
+                      editError={editError}
+                      deleteBusy={deleteBusy}
+                      onOpenEdit={openEdit}
+                      onCloseEdit={closeEdit}
+                      onSave={saveEdit}
+                      onAskDelete={setConfirmDeleteId}
+                      onCancelDelete={() => { setConfirmDeleteId(null); setSwipeId(null); setSwipeX(0); }}
+                      onDelete={deleteMeal}
+                      onTouchStart={onRowTouchStart}
+                      onTouchMove={onRowTouchMove}
+                      onTouchEnd={onRowTouchEnd}
+                    />
                   ))}
                 </div>
               ))}
@@ -1484,6 +1655,124 @@ export default function VoiceTrackDashboard() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Riga pasto con edit/delete (Deploy 5 §7.2).
+// - tap sulla riga (se editabile) → pannello di modifica inline
+// - swipe verso sinistra → box di conferma eliminazione
+// - pulsante Elimina nel pannello → stesso box di conferma
+// Le righe non editabili (demo o storiche "legacy-*") restano di sola lettura.
+// ---------------------------------------------------------------------------
+function MealRow({
+  meal, editable, isEditing, confirming, active, swipeX,
+  editDraft, setEditDraft, editBusy, editError, deleteBusy,
+  onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onDelete,
+  onTouchStart, onTouchMove, onTouchEnd,
+}) {
+  const fonteLabel = String(meal.fonte || '').includes('barcode')
+    ? 'barcode' : meal.fonte === 'pwa-testo' ? 'testo' : 'voce';
+  const setField = (k, v) => setEditDraft((d) => ({ ...(d || {}), [k]: v }));
+  const canTap = editable && swipeX === 0 && !confirming && !isEditing;
+
+  return (
+    <div style={{ borderTop: `1px solid ${C.line}` }}>
+      {/* Riga con swipe */}
+      <div style={{ position: 'relative', overflow: 'hidden' }}>
+        {/* Pulsante elimina rivelato sotto durante lo swipe */}
+        {editable && (
+          <button
+            onClick={() => onAskDelete(meal.id)}
+            aria-label="Elimina"
+            style={{
+              position: 'absolute', top: 0, right: 0, bottom: 0, width: '80px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: C.alert, color: C.bg, border: 'none', cursor: 'pointer',
+            }}
+          >
+            <Trash2 size={18} />
+          </button>
+        )}
+        {/* Contenuto riga (sopra) */}
+        <div
+          onTouchStart={editable ? (e) => onTouchStart(meal, e) : undefined}
+          onTouchMove={editable ? (e) => onTouchMove(meal, e) : undefined}
+          onTouchEnd={editable ? () => onTouchEnd(meal) : undefined}
+          onClick={canTap ? () => onOpenEdit(meal) : undefined}
+          className="flex items-center justify-between"
+          style={{
+            padding: '6px 0', background: C.surface,
+            transform: `translateX(${swipeX}px)`,
+            transition: active ? 'none' : 'transform 0.18s ease',
+            cursor: editable ? 'pointer' : 'default',
+          }}
+        >
+          <div className="flex flex-col">
+            <span style={{ fontSize: '13px' }}>{meal.alimento}</span>
+            <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+              {meal.time} · {meal.grammi}g · {fonteLabel}
+            </span>
+          </div>
+          <div className="flex items-center" style={{ gap: '8px', flexShrink: 0, paddingLeft: '10px' }}>
+            {editable && <Pencil size={13} color={C.inkFaint} />}
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color: C.inkMuted }}>
+              {Math.round(meal.kcal)}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Conferma eliminazione inline (da swipe o da pulsante nel pannello) */}
+      {confirming && (
+        <div style={{ background: C.surfaceRaised, border: `1px solid ${C.alert}`, borderRadius: '10px', padding: '10px 12px', margin: '8px 0' }} className="flex items-center justify-between gap-2">
+          <span style={{ fontSize: '13px' }}>Eliminare «{meal.alimento}»?</span>
+          <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+            <button onClick={() => onDelete(meal)} disabled={deleteBusy} style={{ background: C.alert, color: C.bg, border: 'none', borderRadius: '6px', padding: '6px 12px', fontSize: '13px', fontWeight: 600, cursor: deleteBusy ? 'default' : 'pointer', opacity: deleteBusy ? 0.6 : 1 }} className="flex items-center gap-1">
+              {deleteBusy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Elimina
+            </button>
+            <button onClick={onCancelDelete} disabled={deleteBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '6px 12px', fontSize: '13px', cursor: deleteBusy ? 'default' : 'pointer' }}>
+              Annulla
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Pannello di modifica inline (nascosto mentre si conferma l'eliminazione) */}
+      {isEditing && editDraft && !confirming && (
+        <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', margin: '8px 0' }} className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1">
+            <label style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>ALIMENTO</label>
+            <input
+              value={editDraft.alimento}
+              onChange={(e) => setField('alimento', e.target.value)}
+              style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}
+            />
+          </div>
+          <TargetInput label="Grammi" unit="g" value={editDraft.grammi} onChange={(v) => setField('grammi', v)} color={C.ink} />
+          <TargetInput label="Calorie" unit="kcal" value={editDraft.kcal} onChange={(v) => setField('kcal', v)} color={C.ink} />
+          <TargetInput label="Proteine" unit="g" value={editDraft.proteine} onChange={(v) => setField('proteine', v)} color={C.protein} />
+          <TargetInput label="Carboidrati" unit="g" value={editDraft.carboidrati} onChange={(v) => setField('carboidrati', v)} color={C.carbs} />
+          <TargetInput label="Grassi" unit="g" value={editDraft.grassi} onChange={(v) => setField('grassi', v)} color={C.fat} />
+          {editError && (
+            <div className="flex items-start gap-2" style={{ color: C.alert, fontSize: '12px' }}>
+              <AlertCircle size={13} style={{ marginTop: '2px', flexShrink: 0 }} /><span>{editError}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-2 mt-1">
+            <button onClick={() => onSave(meal)} disabled={editBusy} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: editBusy ? 'default' : 'pointer', opacity: editBusy ? 0.6 : 1 }} className="flex items-center gap-1">
+              {editBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} {editBusy ? 'Salvo…' : 'Salva'}
+            </button>
+            <button onClick={() => onAskDelete(meal.id)} disabled={editBusy} style={{ background: 'transparent', color: C.alert, border: `1px solid ${C.alert}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: editBusy ? 'default' : 'pointer' }} className="flex items-center gap-1">
+              <Trash2 size={14} /> Elimina
+            </button>
+            <button onClick={onCloseEdit} disabled={editBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer', marginLeft: 'auto' }}>
+              Annulla
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

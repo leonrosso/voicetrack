@@ -61,8 +61,9 @@ Se si perdono, la pipeline muore in silenzio.
 | Campo `fonte` esteso (`tasker-voce` / `pwa-voce` / `pwa-barcode`) | ✅ |
 | Parsing bevande in ml ("500 ml di birra") | 🔧 Fix proposto nel system prompt, **da verificare coi log** |
 | Focus camera barcode (parte sulla lente 0.5x) | 🔧 Bug aperto — fix pianificato (Sessione 2, §7) |
-| Colonna `id` + `/update_meal` + `/delete_meal` | ⬜ Sessione 1 (§7) |
-| Edit/delete pasti + Config con % macro nella PWA | ⬜ Sessione 2 (§7) |
+| Colonna `id` + `/update_meal` + `/delete_meal` | ✅ (codice; da deployare sul Cloud Function) |
+| Edit/delete pasti nella PWA (tap→modifica, pulsante+swipe→elimina) | ✅ (codice; da deployare backend + test su telefono) |
+| Config con % macro nella PWA | ⬜ Sessione 2 (§7) |
 | Trigger "scansiona prodotto" → deep link PWA + shortcuts manifest | ⬜ Sessione 3 (§7) |
 | Attivazione 100% hands-free | ❌ Bloccata a livello di sistema — vedi §8 |
 | Prodotti Conad su Open Food Facts | ⚠️ Auto-contribuzione progressiva durante la spesa (§7.4) |
