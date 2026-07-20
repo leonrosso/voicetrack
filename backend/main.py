@@ -45,6 +45,11 @@ OFF_USER_AGENT = "VoiceTrack/1.0 (uso personale)"
 # solo la PWA su Vercel + localhost per lo sviluppo con `npm run dev`.
 # Tasker non manda l'header Origin, quindi non e' toccato dal CORS.
 # Override possibile via env var ALLOWED_ORIGINS (lista separata da virgole).
+#
+# TEMP (test locale da telefono sulla stessa wifi): CORS aperto a tutti.
+# Da richiudere a fine test riportando _CORS_OPEN a False.
+_CORS_OPEN = True
+
 _ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get(
         "ALLOWED_ORIGINS",
@@ -71,7 +76,9 @@ def _cors_headers(request):
         "Access-Control-Max-Age": "3600",
         "Vary": "Origin",
     }
-    if origin in _ALLOWED_ORIGINS:
+    if _CORS_OPEN:
+        headers["Access-Control-Allow-Origin"] = origin or "*"
+    elif origin in _ALLOWED_ORIGINS:
         headers["Access-Control-Allow-Origin"] = origin
     return headers
 
