@@ -1,0 +1,34 @@
+---
+description: Contesto e regole del progetto VoiceTrack (tracciamento calorico vocale)
+globs:
+alwaysApply: true
+---
+
+# VoiceTrack
+
+Sistema personale di tracciamento calorico a voce (italiano). Backend: Google Cloud Function `voicetrack` (Python 3.12, europe-west1). Client: Tasker/AutoVoice (Android) e PWA su Vercel (`voicetrack-chi.vercel.app`). Database: Google Sheets.
+
+## Contesto obbligatorio
+
+Prima di qualsiasi lavoro, leggi:
+
+- @docs/stato-progetto.md — fonte unica di verità: architettura, stato, censimento config, lavori aperti (§7), desideri futuri (§8)
+- @docs/diario-sessioni.md — solo le voci più recenti, per sapere cosa è successo dopo l'ultimo aggiornamento dello stato
+
+## Regole operative
+
+- **Schema Sheets:** ogni modifica di colonna va applicata nella stessa sessione a TUTTI i consumatori (`/log_meal`, `/scan_barcode`, `/daily_summary`, `/dashboard`, `/config`). Vedi §6 dello stato.
+- **Flag di deploy della Cloud Function:** devono restare identici (`--gen2 --runtime python312 --trigger-http --allow-unauthenticated --entry-point voicetrack --region europe-west1 --memory 256MB --timeout 60s --env-vars-file .env.yaml`).
+- **Frasi di test standard** (§9 dello stato) da rilanciare dopo ogni modifica a modello, system prompt o schema.
+- **Ambiente:** Windows + PowerShell → usare `curl.exe` o `Invoke-RestMethod`, comandi su riga unica, mai backslash di continuazione bash.
+- **Frontend:** test su telefono reale via `npm run dev` (stesso Wi-Fi); Web Speech e camera non funzionano in anteprime sandbox. `localStorage`, mai `window.storage`.
+- **Segreti:** mai scrivere chiavi reali nei file di docs o nelle chat. La chiave API vive in 3 posti (env CF, `%VTKEY` Tasker, localStorage PWA): se si tocca, aggiornarli tutti e tre.
+- **Dopo modifiche lato Android:** ricordare all'utente di esportare il backup Tasker.
+
+## Aggiornamento documentazione (NON distruttivo)
+
+A fine sessione, sempre in quest'ordine:
+
+1. **Aggiungi** una voce IN CIMA a `docs/diario-sessioni.md` (formato indicato nel file). Mai modificare o cancellare voci esistenti.
+2. **Modifica per sezione** `docs/stato-progetto.md`: aggiorna solo le sezioni toccate (tipicamente §4 stato, §3 censimento, §7 lavori aperti). Non riscrivere il file da zero, non eliminare §8 (desideri futuri) né la storia in §5.
+3. Se cambi qualcosa qui o in `CLAUDE.md`, mantieni i due file allineati: sono indici gemelli sulla stessa fonte di verità.

@@ -1,0 +1,22 @@
+# Dependencies / build output
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Deploy
+.vercel/
+
+# Secrets — non committare mai
+.env.yaml
+*.env
+diethropic-*.json
+*service-account*.json
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.log
+npm-debug.log*
