@@ -7,6 +7,7 @@ import functions_framework
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 from llm_client import parse_meal_with_llm
@@ -42,7 +43,7 @@ OFF_TIMEOUT_S = 8
 OFF_USER_AGENT = "VoiceTrack/1.0 (uso personale)"
 
 # CORS ristretto (decisione §9.1 del Piano di Consolidamento):
-# solo la PWA su Vercel + localhost per lo sviluppo con `npm run dev`.
+# la PWA di produzione su Vercel + localhost per lo sviluppo con `npm run dev`.
 # Tasker non manda l'header Origin, quindi non e' toccato dal CORS.
 # Override possibile via env var ALLOWED_ORIGINS (lista separata da virgole).
 _ALLOWED_ORIGINS = [
@@ -51,6 +52,32 @@ _ALLOWED_ORIGINS = [
         "https://voicetrack-chi.vercel.app,http://localhost:5173"
     ).split(",") if o.strip()
 ]
+
+# In aggiunta alla lista esatta, si accettano anche i Preview Deployment
+# Vercel dello stesso progetto (dominio generato ad ogni push di branch,
+# es. voicetrack-git-<branch>-<team>.vercel.app o voicetrack-<hash>-<team>.vercel.app).
+# Motivo: testare voce/barcode da telefono su HTTPS vera senza WiFi/USB debug
+# e senza il toggle sul branch claude/cors-open-local-testing-xxxx.
+# Resta comunque scoping al solo progetto (non un wildcard *.vercel.app):
+# il rischio aggiunto e' che chiunque deployi un progetto Vercel chiamato
+# "voicetrack" (nome non riservato) otterrebbe un origin che passa il match.
+# Per uso personale e' un compromesso accettabile; annotato in stato-progetto.md §3.
+# Override possibile via env var ALLOWED_ORIGIN_PATTERN.
+_ALLOWED_ORIGIN_PATTERN = re.compile(
+    os.environ.get(
+        "ALLOWED_ORIGIN_PATTERN",
+        r"^https://voicetrack-[a-z0-9-]+\.vercel\.app$"
+    )
+)
+
+
+def _origin_allowed(origin):
+    """True se l'origin e' nella allowlist esatta o matcha i preview Vercel del progetto."""
+    if not origin:
+        return False
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    return bool(_ALLOWED_ORIGIN_PATTERN.match(origin))
 
 # Valori ammessi per il campo `fonte` (§3.3 del Piano di Consolidamento).
 # "voce" e "barcode" restano per retrocompatibilita' con le righe storiche.
@@ -71,7 +98,7 @@ def _cors_headers(request):
         "Access-Control-Max-Age": "3600",
         "Vary": "Origin",
     }
-    if origin in _ALLOWED_ORIGINS:
+    if _origin_allowed(origin):
         headers["Access-Control-Allow-Origin"] = origin
     return headers
 
