@@ -7,7 +7,6 @@ import functions_framework
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone, timedelta
 
 from llm_client import parse_meal_with_llm
@@ -32,7 +31,7 @@ TZ_ITALY = timezone(timedelta(hours=2))
 API_KEY = os.environ.get("VOICETRACK_API_KEY", "")
 
 # Versione applicativa, esposta da /health (aggiornare a ogni deploy significativo)
-APP_VERSION = os.environ.get("APP_VERSION", "deploy5-s1-2026-07-20")
+APP_VERSION = os.environ.get("APP_VERSION", "deploy5-cors-open-2026-07-21")
 
 # Open Food Facts (Deploy 4, §5 del Piano di Consolidamento).
 # API comunitaria senza SLA (§3.9 del registro): timeout corto e
@@ -42,42 +41,12 @@ OFF_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}?fields=produ
 OFF_TIMEOUT_S = 8
 OFF_USER_AGENT = "VoiceTrack/1.0 (uso personale)"
 
-# CORS ristretto (decisione §9.1 del Piano di Consolidamento):
-# la PWA di produzione su Vercel + localhost per lo sviluppo con `npm run dev`.
-# Tasker non manda l'header Origin, quindi non e' toccato dal CORS.
-# Override possibile via env var ALLOWED_ORIGINS (lista separata da virgole).
-_ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get(
-        "ALLOWED_ORIGINS",
-        "https://voicetrack-chi.vercel.app,http://localhost:5173"
-    ).split(",") if o.strip()
-]
-
-# In aggiunta alla lista esatta, si accettano anche i Preview Deployment
-# Vercel dello stesso progetto (dominio generato ad ogni push di branch,
-# es. voicetrack-git-<branch>-<team>.vercel.app o voicetrack-<hash>-<team>.vercel.app).
-# Motivo: testare voce/barcode da telefono su HTTPS vera senza WiFi/USB debug
-# e senza il toggle sul branch claude/cors-open-local-testing-xxxx.
-# Resta comunque scoping al solo progetto (non un wildcard *.vercel.app):
-# il rischio aggiunto e' che chiunque deployi un progetto Vercel chiamato
-# "voicetrack" (nome non riservato) otterrebbe un origin che passa il match.
-# Per uso personale e' un compromesso accettabile; annotato in stato-progetto.md §3.
-# Override possibile via env var ALLOWED_ORIGIN_PATTERN.
-_ALLOWED_ORIGIN_PATTERN = re.compile(
-    os.environ.get(
-        "ALLOWED_ORIGIN_PATTERN",
-        r"^https://voicetrack-[a-z0-9-]+\.vercel\.app$"
-    )
-)
-
-
-def _origin_allowed(origin):
-    """True se l'origin e' nella allowlist esatta o matcha i preview Vercel del progetto."""
-    if not origin:
-        return False
-    if origin in _ALLOWED_ORIGINS:
-        return True
-    return bool(_ALLOWED_ORIGIN_PATTERN.match(origin))
+# CORS aperto a tutti (decisione in VoiceTrack_Workflow_Semplificato.md, 21 luglio 2026):
+# con la Cloud Function in --allow-unauthenticated, la vera barriera e' gia'
+# la API key applicativa (_verify_api_key) — il CORS ristretto era solo
+# "hardening gratuito", non una misura di sicurezza necessaria. Aprirlo
+# toglie l'attrito di preview Vercel / IP locale / branch CORS-open dedicati.
+# Tasker non manda l'header Origin, quindi non e' comunque toccato dal CORS.
 
 # Valori ammessi per il campo `fonte` (§3.3 del Piano di Consolidamento).
 # "voce" e "barcode" restano per retrocompatibilita' con le righe storiche.
@@ -88,19 +57,15 @@ _FONTE_DEFAULT = "tasker-voce"
 def _cors_headers(request):
     """
     Ritorna gli header CORS per la richiesta corrente.
-    L'Origin viene riflesso solo se presente nell'allowlist; altrimenti
-    non viene concesso nulla (il browser bloccherà la risposta).
+    Aperto a tutti gli origin (vedi nota sopra _FONTI_VALIDE): la barriera
+    reale e' la API key applicativa, non il CORS.
     """
-    origin = request.headers.get("Origin", "")
-    headers = {
+    return {
+        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
         "Access-Control-Max-Age": "3600",
-        "Vary": "Origin",
     }
-    if _origin_allowed(origin):
-        headers["Access-Control-Allow-Origin"] = origin
-    return headers
 
 
 def _verify_api_key(request):
