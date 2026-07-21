@@ -57,13 +57,15 @@ Se si perdono, la pipeline muore in silenzio.
 |---|---|
 | Trigger Tasker "traccia pasto" (Home → AutoVoice, it-IT) | ✅ |
 | Cloud Function + tutti gli endpoint (`/log_meal`, `/daily_summary`, `/dashboard`, `/config`, `/health`, `/scan_barcode`) | ✅ |
-| PWA completa: dashboard, Config, voce (Deploy 3), barcode (Deploy 4), warm-up `/health`, cache anti cold-start | ✅ |
+| PWA completa: dashboard, Config, voce (Deploy 3), barcode (Deploy 4), warm-up `/health`, cache anti cold-start, carosello swipe animato tra tab Diario/Traccia/Scan | ✅ |
+| Card trend Diario con viste Anno / Mese / Settimana (`storico_annuale` / `storico_mensile` / `storico_settimanale`) | ✅ (codice; da deployare backend + Vercel) |
 | Campo `fonte` esteso (`tasker-voce` / `pwa-voce` / `pwa-barcode`) | ✅ |
 | Parsing bevande in ml ("500 ml di birra") | 🔧 Fix proposto nel system prompt, **da verificare coi log** |
 | Focus camera barcode (parte sulla lente 0.5x) | 🔧 Bug aperto — fix pianificato (Sessione 2, §7) |
 | Colonna `id` + `/update_meal` + `/delete_meal` | ✅ (codice; da deployare sul Cloud Function) |
-| Edit/delete pasti nella PWA (tap→modifica, pulsante+swipe→elimina) | ✅ (codice; da deployare backend + test su telefono) |
-| Config con % macro nella PWA | ⬜ Sessione 2 (§7) |
+| Edit/delete pasti nella PWA (tap→modifica, pulsante+swipe→elimina; pannello edit con animazione collapse altezza/opacità) | ✅ (codice; da deployare backend + test su telefono) |
+| Config con % macro nella PWA | ✅ (codice; editor Obiettivi con slider di ripartizione **indipendenti**, grammi derivati da kcal, totale segnalato in rosso se ≠100% e salvataggio bloccato finché non è 100%; card Macronutrienti senza % accanto ai macro) |
+| Card azioni rapide sul Diario (testo / scan / voce → tab Traccia o Scan) | ✅ (codice; solo giorno corrente) |
 | Trigger "scansiona prodotto" → deep link PWA + shortcuts manifest | ⬜ Sessione 3 (§7) |
 | Attivazione 100% hands-free | ❌ Bloccata a livello di sistema — vedi §8 |
 | Prodotti Conad su Open Food Facts | ⚠️ Auto-contribuzione progressiva durante la spesa (§7.4) |
@@ -103,7 +105,9 @@ Metodo per il frontend: repo locale + `npm run dev` + anteprima live sul telefon
 
 ### 7.2 Sessione 2 — Frontend PWA
 - **Edit/delete pasti:** tap → pannello modifica → `/update_meal`; swipe → conferma → `/delete_meal`; refresh dashboard + invalidazione cache `vt-cache`.
-- **Config collegata:** percentuali macro accanto ai grammi; cambio kcal → grammi ricalcolati dalle % (P/C ×4, G ×9); cambio grammi → % aggiornata; avviso se somma % ≠ ~100.
+- **Config collegata:** ✅ (codice) editor Obiettivi con **slider di ripartizione indipendenti** per ogni macro (`macroPct`): trascinandone uno gli altri due NON cambiano, quindi il totale può differire da 100. La riga «Ripartizione» mostra il totale reale e diventa **rossa se ≠ 100%**, standard a 100%; `saveTargets` **blocca il salvataggio** se la somma ≠ 100% con messaggio dedicato nel pannello. I **grammi salvati sono derivati** da split + kcal (P/C ÷4, G ÷9) e riempiono esattamente le calorie quando la somma è 100; all'apertura le % sono normalizzate a 100 dai grammi salvati. Cambiando le kcal i grammi si ricalcolano live. Rimosse le % dei macro accanto a ogni voce nella card Macronutrienti del Diario. Superato il precedente modello a somma fissa 100 con ridistribuzione proporzionale. Da verificare su telefono + deploy Vercel.
+- **Card azioni rapide sul Diario:** ✅ (codice) tra Macronutrienti e Pasti di oggi, tre bottoni rotondi (TESTO / SCAN / VOCE) visibili solo oggi; aprono i tab Traccia/Scan esistenti e avviano focus input, camera o microfono.
+- **Card trend multi-range:** ✅ (codice) pulsanti Anno / Mese / Settimana; `/dashboard` espone anche `storico_mensile` (5 settimane, media giornaliera) e `storico_annuale` (12 mesi, media sui giorni loggati). Da deployare CF + Vercel.
 - **Fix focus camera:** `track.getCapabilities().zoom` → `applyConstraints({advanced:[{zoom:2}]})`; fallback `enumerateDevices()` con deviceId salvato in localStorage; `focusMode: 'continuous'` se disponibile.
 - **Fallback "prodotto non trovato" (opzionale):** dettatura vocale nome + valori per 100 g → `/log_meal`; opzionale popolare tab "Alimenti Frequenti".
 

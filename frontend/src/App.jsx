@@ -4,7 +4,7 @@ import {
   Beef, Wheat, Droplet, Mic, AlertCircle, Check, UtensilsCrossed,
   LayoutGrid, Volume2, Loader2, MessageCircleQuestion,
   ChevronLeft, ChevronRight, Send, ScanLine, Camera,
-  Pencil, Trash2
+  Pencil, Trash2, Keyboard
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
@@ -35,12 +35,29 @@ const C = {
 
 const FONT_IMPORT = "@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');";
 
-// Animazione del microfono in ascolto (anello che pulsa).
+// Animazione del microfono in ascolto (anello che pulsa) + collapse pannello edit.
 const EXTRA_CSS = `
 @keyframes vt-pulse {
   0%   { box-shadow: 0 0 0 0 rgba(143, 174, 134, 0.45); }
   70%  { box-shadow: 0 0 0 18px rgba(143, 174, 134, 0); }
   100% { box-shadow: 0 0 0 0 rgba(143, 174, 134, 0); }
+}
+.vt-edit-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.vt-edit-collapse.is-open {
+  grid-template-rows: 1fr;
+}
+.vt-edit-collapse-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+.vt-edit-collapse.is-open > .vt-edit-collapse-inner {
+  opacity: 1;
 }`;
 
 // ---------------------------------------------------------------------------
@@ -97,13 +114,79 @@ const DEMO_MEALS_TODAY = [
   { id: 5, pasto: 'spuntino', time: '17:20', alimento: 'Barretta proteica', grammi: 40, kcal: 160, proteine: 15, carboidrati: 12, grassi: 5, fonte: 'barcode' },
 ];
 
-const DEMO_WEEK_LABELS = ['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'];
-const DEMO_WEEK = [1950, 2080, 1740, 2260, 2190, 2380, 1135].map((kcal, i) => ({
-  label: DEMO_WEEK_LABELS[i], kcal,
-}));
+// YYYY-MM-DD in ora locale (niente toISOString: sballerebbe il fuso).
+const fmtYMD = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+// Indicizzato su Date.getDay() (0 = domenica), stesse etichette di WEEKDAY_IT
+// nel backend (che invece indicizza su weekday(), 0 = lunedi').
+const WEEKDAY_IT_BY_JSDAY = ['dom', 'lun', 'mar', 'mer', 'gio', 'ven', 'sab'];
+
+// Date reali degli ultimi 7 giorni (oggi compreso), come /dashboard: cosi'
+// anche in demo il tap su un giorno del grafico porta al giorno giusto.
+function buildDemoWeek() {
+  const kcals = [1950, 2080, 1740, 2260, 2190, 2380, 1135];
+  const today = new Date();
+  const week = [];
+  for (let j = 6; j >= 0; j--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - j);
+    week.push({ label: WEEKDAY_IT_BY_JSDAY[d.getDay()], date: fmtYMD(d), kcal: kcals[6 - j] });
+  }
+  return week;
+}
+const DEMO_WEEK = buildDemoWeek();
+
+const MONTH_IT = ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+
+// Ultime 5 settimane rolling (media giornaliera), allineato a /dashboard.
+function buildDemoMonth() {
+  const kcals = [1980, 2050, 1890, 2210, 2100];
+  const today = new Date();
+  const out = [];
+  for (let w = 4; w >= 0; w--) {
+    const start = new Date(today);
+    start.setDate(start.getDate() - (w * 7 + 6));
+    out.push({
+      label: `${start.getDate()}/${start.getMonth() + 1}`,
+      date: fmtYMD(start),
+      kcal: kcals[4 - w],
+    });
+  }
+  return out;
+}
+const DEMO_MONTH = buildDemoMonth();
+
+// Ultimi 12 mesi (media giornaliera), allineato a /dashboard.
+function buildDemoYear() {
+  const kcals = [2050, 1980, 2120, 1900, 2180, 2250, 2080, 1950, 2020, 2150, 2100, 2030];
+  const today = new Date();
+  const out = [];
+  for (let m = 11; m >= 0; m--) {
+    const d = new Date(today.getFullYear(), today.getMonth() - m, 1);
+    out.push({
+      label: MONTH_IT[d.getMonth()],
+      date: fmtYMD(d),
+      kcal: kcals[11 - m],
+    });
+  }
+  return out;
+}
+const DEMO_YEAR = buildDemoYear();
+
+const TREND_RANGES = [
+  { id: 'year', label: 'ANNO' },
+  { id: 'month', label: 'MESE' },
+  { id: 'week', label: 'SETTIMANA' },
+];
+const TREND_TITLE = {
+  week: 'Ultimi 7 giorni · tocca un giorno per aprirlo',
+  month: 'Ultime 5 settimane · tocca una settimana per aprirla',
+  year: 'Ultimi 12 mesi · tocca un mese per aprirlo',
+};
 const PASTO_ORDER = ['colazione', 'pranzo', 'spuntino', 'cena'];
 const PASTO_LABEL = { colazione: 'Colazione', pranzo: 'Pranzo', spuntino: 'Spuntino', cena: 'Cena' };
+const TAB_ORDER = ['diario', 'traccia', 'scan'];
 
 function groupByPasto(meals) {
   const groups = {};
@@ -131,9 +214,53 @@ const dayLabel = (d = new Date()) => {
   return s.charAt(0).toUpperCase() + s.slice(1);
 };
 
-// YYYY-MM-DD in ora locale (niente toISOString: sballerebbe il fuso).
-const fmtYMD = (d) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// ---------------------------------------------------------------------------
+// Ripartizione macro come percentuali (Deploy 5 §7.2).
+// Il target salvato resta in grammi {kcal, proteine, carboidrati, grassi};
+// nell'editor lo pilotiamo però come split percentuale che somma SEMPRE a 100.
+// P/C valgono 4 kcal/g, G vale 9 kcal/g.
+// ---------------------------------------------------------------------------
+const toNum = (v) => {
+  const n = parseFloat(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+};
+
+// Arrotonda {p,c,g} a interi che sommano ESATTAMENTE a 100 (metodo del resto
+// più grande): floor di ciascuno, poi i punti mancanti vanno alle frazioni
+// più alte.
+function normalize100({ p, c, g }) {
+  const raw = [p, c, g];
+  const floor = raw.map((v) => Math.floor(v));
+  let rem = 100 - floor.reduce((a, b) => a + b, 0);
+  const order = raw
+    .map((v, i) => ({ i, f: v - floor[i] }))
+    .sort((a, b) => b.f - a.f);
+  const out = [...floor];
+  for (let k = 0; k < rem; k++) out[order[k % 3].i] += 1;
+  return { p: out[0], c: out[1], g: out[2] };
+}
+
+// Percentuali (somma 100) a partire dai grammi salvati. Se i macro non hanno
+// calorie (target vuoto) ripiega su una ripartizione neutra 34/33/33.
+function pctFromGrams(t) {
+  const kP = toNum(t.proteine) * 4;
+  const kC = toNum(t.carboidrati) * 4;
+  const kG = toNum(t.grassi) * 9;
+  const sum = kP + kC + kG;
+  if (sum <= 0) return { p: 34, c: 33, g: 33 };
+  return normalize100({ p: (kP / sum) * 100, c: (kC / sum) * 100, g: (kG / sum) * 100 });
+}
+
+// Grammi derivati da split % + kcal target: i grammi riempiono esattamente le
+// calorie (perché le % sommano a 100).
+function gramsFromPct(kcal, pct) {
+  const k = toNum(kcal);
+  return {
+    proteine: Math.round(((pct.p / 100) * k) / 4),
+    carboidrati: Math.round(((pct.c / 100) * k) / 4),
+    grassi: Math.round(((pct.g / 100) * k) / 9),
+  };
+}
 
 // ---------------------------------------------------------------------------
 
@@ -145,13 +272,25 @@ export default function VoiceTrackDashboard() {
   const [errorMsg, setErrorMsg] = useState('');
   const [meals, setMeals] = useState(DEMO_MEALS_TODAY);
   const [week, setWeek] = useState(DEMO_WEEK);
+  const [month, setMonth] = useState(DEMO_MONTH);
+  const [year, setYear] = useState(DEMO_YEAR);
+  const [trendRange, setTrendRange] = useState('week'); // week | month | year
   const [target, setTarget] = useState(DEMO_TARGET);
   const [storageReady, setStorageReady] = useState(false);
   const [targetsOpen, setTargetsOpen] = useState(false);
+  const [targetsMounted, setTargetsMounted] = useState(false);
+  const [targetsAnimOpen, setTargetsAnimOpen] = useState(false);
+  const targetsCloseTimerRef = useRef(null);
+  const targetsMountedRef = useRef(false);
+  targetsMountedRef.current = targetsMounted;
   const [targetDraft, setTargetDraft] = useState(DEMO_TARGET);
   const [savingTargets, setSavingTargets] = useState(false);
   const [targetMsg, setTargetMsg] = useState('');
   const [lastSync, setLastSync] = useState(null);
+  // Ripartizione macro (%) mentre l'editor Obiettivi è aperto: somma sempre 100.
+  // Inizializzata dai grammi salvati all'apertura del pannello; i grammi da
+  // salvare sono derivati da questo split + kcal (§7.2).
+  const [macroPct, setMacroPct] = useState(() => pctFromGrams(DEMO_TARGET));
 
   // --- Tab attivo: 'diario' (dashboard) | 'traccia' (voce) ---
   const [view, setView] = useState('diario');
@@ -172,7 +311,7 @@ export default function VoiceTrackDashboard() {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id in attesa di conferma
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [swipeId, setSwipeId] = useState(null);            // riga trascinata
-  const [swipeX, setSwipeX] = useState(0);                 // offset corrente (px, ≤ 0)
+  const [swipeX, setSwipeX] = useState(0);                 // offset corrente (px, ±SWIPE_MAX)
 
   const POLL_MS = 20000; // refresh dati ogni 20s mentre l'app e' aperta e visibile
 
@@ -189,8 +328,12 @@ export default function VoiceTrackDashboard() {
       const loadedTarget = json?.target ?? DEMO_TARGET;
       const nextMeals = json?.oggi?.pasti ?? [];
       const nextWeek = json?.storico_settimanale ?? DEMO_WEEK;
+      const nextMonth = json?.storico_mensile ?? DEMO_MONTH;
+      const nextYear = json?.storico_annuale ?? DEMO_YEAR;
       setMeals(nextMeals);
       setWeek(nextWeek);
+      setMonth(nextMonth);
+      setYear(nextYear);
       setTarget(loadedTarget);
       setTargetDraft((prev) => (targetsOpen ? prev : loadedTarget));
       setStatus('live');
@@ -198,7 +341,10 @@ export default function VoiceTrackDashboard() {
       // Salva l'ultimo dato buono in cache: al prossimo reload lo mostriamo
       // subito (istantaneo) mentre la Cloud Function esce dal cold start.
       try {
-        await storage.set('vt-cache', JSON.stringify({ meals: nextMeals, week: nextWeek, target: loadedTarget, at: Date.now() }));
+        await storage.set('vt-cache', JSON.stringify({
+          meals: nextMeals, week: nextWeek, month: nextMonth, year: nextYear,
+          target: loadedTarget, at: Date.now(),
+        }));
       } catch (e) {}
     } catch (e) {
       // In un refresh silenzioso non buttiamo giu' l'app sui dati demo:
@@ -206,12 +352,42 @@ export default function VoiceTrackDashboard() {
       if (!silent) {
         setMeals(DEMO_MEALS_TODAY);
         setWeek(DEMO_WEEK);
+        setMonth(DEMO_MONTH);
+        setYear(DEMO_YEAR);
         setTarget(DEMO_TARGET);
         setStatus('error');
       }
       setErrorMsg(e.message || 'Impossibile raggiungere il backend');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetsOpen]);
+
+  // Pannello Obiettivi: montato durante exit così altezza/opacità possono chiudersi.
+  useEffect(() => {
+    if (targetsCloseTimerRef.current) {
+      clearTimeout(targetsCloseTimerRef.current);
+      targetsCloseTimerRef.current = null;
+    }
+    if (targetsOpen) {
+      setTargetsMounted(true);
+      const raf = requestAnimationFrame(() => {
+        requestAnimationFrame(() => setTargetsAnimOpen(true));
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    if (targetsMountedRef.current) {
+      setTargetsAnimOpen(false);
+      targetsCloseTimerRef.current = setTimeout(() => {
+        setTargetsMounted(false);
+        targetsCloseTimerRef.current = null;
+      }, 300);
+    }
+    return () => {
+      if (targetsCloseTimerRef.current) {
+        clearTimeout(targetsCloseTimerRef.current);
+        targetsCloseTimerRef.current = null;
+      }
+    };
   }, [targetsOpen]);
 
   // Load saved endpoint config on mount.
@@ -234,6 +410,8 @@ export default function VoiceTrackDashboard() {
                 const c = JSON.parse(cached.value);
                 if (Array.isArray(c.meals)) setMeals(c.meals);
                 if (Array.isArray(c.week)) setWeek(c.week);
+                if (Array.isArray(c.month)) setMonth(c.month);
+                if (Array.isArray(c.year)) setYear(c.year);
                 if (c.target) setTarget(c.target);
                 setStatus('live');
                 hasCache = true;
@@ -318,18 +496,22 @@ export default function VoiceTrackDashboard() {
     setConfigDraft({ apiUrl: '', apiKey: '' });
     setMeals(DEMO_MEALS_TODAY);
     setWeek(DEMO_WEEK);
+    setMonth(DEMO_MONTH);
+    setYear(DEMO_YEAR);
     setTarget(DEMO_TARGET);
     setStatus('demo');
     setConfigOpen(false);
   };
 
   const saveTargets = async () => {
-    const clean = {
-      kcal: Number(targetDraft.kcal) || DEMO_TARGET.kcal,
-      proteine: Number(targetDraft.proteine) || DEMO_TARGET.proteine,
-      carboidrati: Number(targetDraft.carboidrati) || DEMO_TARGET.carboidrati,
-      grassi: Number(targetDraft.grassi) || DEMO_TARGET.grassi,
-    };
+    // Gli slider sono indipendenti: si salva solo con una ripartizione al 100%,
+    // così i grammi derivati da split % + kcal riempiono esattamente le calorie.
+    if (macroPct.p + macroPct.c + macroPct.g !== 100) {
+      setTargetMsg('Serve una ripartizione al 100% per salvare');
+      return;
+    }
+    const kcal = Number(targetDraft.kcal) || DEMO_TARGET.kcal;
+    const clean = { kcal, ...gramsFromPct(kcal, macroPct) };
     // Live: salva sul backend nella tab Config
     if (config.apiUrl) {
       setSavingTargets(true);
@@ -379,6 +561,8 @@ export default function VoiceTrackDashboard() {
   const pendingTextRef = useRef('');   // testo accumulato in attesa di chiarimento
   const clarifyRoundsRef = useRef(0);
   const voiceRef = useRef(null);       // voce italiana per SpeechSynthesis
+  const pendingActionRef = useRef(null); // 'text' | 'voice' | 'scan' | null — azioni dalla card Diario
+  const typedInputRef = useRef(null);
 
   const speechSupported = !!SpeechRecognitionAPI && typeof window.speechSynthesis !== 'undefined';
 
@@ -769,6 +953,27 @@ export default function VoiceTrackDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [barcodeSupported, scanState, sendBarcode, stopCamera]);
 
+  // Card azioni rapide sul Diario: dopo setView, avvia focus / mic / camera.
+  const launchQuickAction = useCallback((action) => {
+    pendingActionRef.current = action;
+    setView(action === 'scan' ? 'scan' : 'traccia');
+  }, []);
+
+  useEffect(() => {
+    const action = pendingActionRef.current;
+    if (!action) return;
+    if (action === 'text' && view === 'traccia') {
+      pendingActionRef.current = null;
+      requestAnimationFrame(() => typedInputRef.current?.focus());
+    } else if (action === 'voice' && view === 'traccia') {
+      pendingActionRef.current = null;
+      if (micState === 'idle') startListening(false);
+    } else if (action === 'scan' && view === 'scan') {
+      pendingActionRef.current = null;
+      startScan();
+    }
+  }, [view, micState, startListening, startScan]);
+
   const confirmQty = useCallback(() => {
     const n = parseFloat(String(scanQty).replace(',', '.'));
     if (!scanProduct || !Number.isFinite(n) || n <= 0) return;
@@ -802,6 +1007,21 @@ export default function VoiceTrackDashboard() {
     return d;
   }, [dayOffset]);
   const selectedDateStr = fmtYMD(selectedDate);
+
+  const trendData = trendRange === 'year' ? year : trendRange === 'month' ? month : week;
+
+  // Tap su un bucket del grafico trend → ci si sposta nel Diario a quella data
+  // (giorno / inizio settimana / primo del mese). dayOffset e' sempre <= 0.
+  const goToDate = useCallback((dateStr) => {
+    if (!dateStr) return;
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const targetDate = new Date(y, m - 1, d);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    targetDate.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((targetDate - today) / 86400000);
+    setDayOffset(Math.min(diffDays, 0));
+  }, []);
 
   // Giorni passati: /daily_summary?date=... ritorna gia' il dettaglio righe.
   // Il flusso live di oggi (fetchLive + polling) resta intoccato.
@@ -887,6 +1107,14 @@ export default function VoiceTrackDashboard() {
     return Number.isFinite(n) ? n : 0;
   };
 
+  // --- Obiettivi: split macro in % (Deploy 5 §7.2) -------------------------
+  // Le percentuali (macroPct) sono la fonte di verità mentre l'editor è aperto.
+  // Gli slider sono indipendenti: muoverne uno non tocca gli altri due; il
+  // totale può quindi differire da 100 e va portato a 100 per salvare.
+  const onTargetKcalChange = (v) => setTargetDraft((d) => ({ ...d, kcal: v }));
+  const setMacroSlider = (which, v) =>
+    setMacroPct((prev) => ({ ...prev, [which]: Math.max(0, Math.min(100, Math.round(v))) }));
+
   const saveEdit = useCallback(async (meal) => {
     if (!editDraft || editBusy) return;
     setEditBusy(true);
@@ -952,34 +1180,141 @@ export default function VoiceTrackDashboard() {
     }
   }, [deleteBusy, config, editingId, closeEdit, refreshDay]);
 
-  // --- Swipe-to-delete: drag orizzontale sulla riga (§5.5 del piano) ---
+  // --- Swipe sulla riga: dx→sx elimina, sx→dx modifica (§5.5 del piano) ---
   const SWIPE_MAX = 80;      // apertura massima (px)
-  const SWIPE_TRIGGER = 48;  // soglia oltre cui si rivela il pulsante elimina
+  const SWIPE_TRIGGER = 48;  // soglia oltre cui scatta l'azione
   const swipeStartXRef = useRef(0);
 
   const onRowTouchStart = useCallback((m, e) => {
-    if (!isEditable(m) || confirmDeleteId) return;
+    if (!isEditable(m) || confirmDeleteId || editingId) return;
     swipeStartXRef.current = e.touches[0].clientX;
     setSwipeId(m.id);
-  }, [isEditable, confirmDeleteId]);
+  }, [isEditable, confirmDeleteId, editingId]);
 
   const onRowTouchMove = useCallback((m, e) => {
     if (swipeId !== m.id) return;
     const dx = e.touches[0].clientX - swipeStartXRef.current;
-    // Solo trascinamento verso sinistra, clampato in [-SWIPE_MAX, 0].
-    setSwipeX(Math.max(-SWIPE_MAX, Math.min(0, dx)));
+    setSwipeX(Math.max(-SWIPE_MAX, Math.min(SWIPE_MAX, dx)));
   }, [swipeId]);
 
   const onRowTouchEnd = useCallback((m) => {
     if (swipeId !== m.id) return;
-    if (swipeX <= -SWIPE_TRIGGER) {
-      // Oltre soglia: la riga torna a posto e compare il box di conferma
-      // (stesso percorso del pulsante Elimina nel pannello).
+    if (swipeX >= SWIPE_TRIGGER) {
+      openEdit(m);
+    } else if (swipeX <= -SWIPE_TRIGGER) {
       setConfirmDeleteId(m.id);
     }
     setSwipeX(0);
     setSwipeId(null);
-  }, [swipeId, swipeX]);
+  }, [swipeId, swipeX, openEdit]);
+
+  // --- Carosello schede Diario | Traccia | Scan (drag + animazione) ---
+  const TAB_SWIPE_MIN = 56;
+  const TAB_SWIPE_RATIO = 0.22;
+  const pagerRef = useRef(null);
+  const tabSwipeRef = useRef(null); // { x, y, axis, width }
+  const tabDragXRef = useRef(0);
+  const [tabDragX, setTabDragX] = useState(0);
+  const [tabDragging, setTabDragging] = useState(false);
+  const tabIdx = TAB_ORDER.indexOf(view);
+
+  const setTabDrag = useCallback((x) => {
+    tabDragXRef.current = x;
+    setTabDragX(x);
+  }, []);
+
+  const tabSwipeBlocked = useCallback(
+    () => configOpen || targetsOpen || !!editingId || !!confirmDeleteId || scanState === 'scanning',
+    [configOpen, targetsOpen, editingId, confirmDeleteId, scanState]
+  );
+
+  const isTabSwipeBlockedTarget = (el) =>
+    !!el?.closest?.('input, textarea, button, select, a, [data-no-tab-swipe]');
+
+  const goToTab = useCallback((nextId, fromDrag = false) => {
+    const from = TAB_ORDER.indexOf(view);
+    const to = TAB_ORDER.indexOf(nextId);
+    if (to < 0 || from === to) {
+      setTabDragging(false);
+      setTabDrag(0);
+      return;
+    }
+    if (fromDrag) {
+      const w = tabSwipeRef.current?.width || pagerRef.current?.offsetWidth || 1;
+      const visual = -from * w + tabDragXRef.current;
+      const targetBase = -to * w;
+      setTabDragging(true);
+      setView(nextId);
+      setTabDrag(visual - targetBase);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setTabDragging(false);
+          setTabDrag(0);
+          tabSwipeRef.current = null;
+        });
+      });
+    } else {
+      setTabDragging(false);
+      setTabDrag(0);
+      setView(nextId);
+    }
+  }, [view, setTabDrag]);
+
+  const onTabSwipeStart = useCallback((e) => {
+    if (tabSwipeBlocked() || isTabSwipeBlockedTarget(e.target) || swipeId) {
+      tabSwipeRef.current = null;
+      return;
+    }
+    tabSwipeRef.current = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY,
+      axis: null,
+      width: pagerRef.current?.offsetWidth || 1,
+    };
+  }, [tabSwipeBlocked, swipeId]);
+
+  const onTabSwipeMove = useCallback((e) => {
+    const s = tabSwipeRef.current;
+    if (!s || swipeId) return;
+    const dx = e.touches[0].clientX - s.x;
+    const dy = e.touches[0].clientY - s.y;
+    if (!s.axis) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      s.axis = Math.abs(dx) > Math.abs(dy) * 1.1 ? 'x' : 'y';
+      if (s.axis === 'y') return;
+      setTabDragging(true);
+    }
+    if (s.axis !== 'x') return;
+    const idx = TAB_ORDER.indexOf(view);
+    let x = dx;
+    if ((idx === 0 && x > 0) || (idx === TAB_ORDER.length - 1 && x < 0)) {
+      x *= 0.35;
+    }
+    setTabDrag(x);
+  }, [view, swipeId, setTabDrag]);
+
+  const onTabSwipeEnd = useCallback(() => {
+    const s = tabSwipeRef.current;
+    if (!s || s.axis !== 'x' || swipeId) {
+      tabSwipeRef.current = null;
+      setTabDragging(false);
+      setTabDrag(0);
+      return;
+    }
+    const w = s.width || 1;
+    const dx = tabDragXRef.current;
+    const idx = TAB_ORDER.indexOf(view);
+    const enough = Math.abs(dx) >= Math.max(TAB_SWIPE_MIN, w * TAB_SWIPE_RATIO);
+    let next = view;
+    if (enough && dx < 0 && idx < TAB_ORDER.length - 1) next = TAB_ORDER[idx + 1];
+    else if (enough && dx > 0 && idx > 0) next = TAB_ORDER[idx - 1];
+    if (next !== view) goToTab(next, true);
+    else {
+      setTabDragging(false);
+      setTabDrag(0);
+      tabSwipeRef.current = null;
+    }
+  }, [view, swipeId, goToTab, setTabDrag]);
 
   const totals = useMemo(() => sumTotals(displayedMeals), [displayedMeals]);
   const grouped = useMemo(() => groupByPasto(displayedMeals), [displayedMeals]);
@@ -992,7 +1327,13 @@ export default function VoiceTrackDashboard() {
     { name: 'Carboidrati', grams: totals.carboidrati, cal: totals.carboidrati * 4, color: C.carbs },
     { name: 'Grassi', grams: totals.grassi, cal: totals.grassi * 9, color: C.fat },
   ];
-  const macroTotalCal = macroCalData.reduce((s, m) => s + m.cal, 0) || 1;
+
+  // Grammi dell'obiettivo derivati dallo split % + kcal (per l'anteprima
+  // accanto a ogni slider). Le % sommano sempre a 100 → i grammi riempiono
+  // esattamente le calorie target.
+  const draftGrams = gramsFromPct(targetDraft.kcal, macroPct);
+  // Somma delle % degli slider (indipendenti): deve essere 100 per salvare.
+  const macroSum = macroPct.p + macroPct.c + macroPct.g;
 
   const statusDot = status === 'live' ? C.good : status === 'error' ? C.alert : C.amber;
   const statusText = status === 'live' ? 'Connesso' : status === 'error' ? 'Dati demo · errore connessione' : status === 'loading' ? 'Caricamento…' : 'Dati demo';
@@ -1032,7 +1373,7 @@ export default function VoiceTrackDashboard() {
           ].map((t) => (
             <button
               key={t.id}
-              onClick={() => setView(t.id)}
+              onClick={() => goToTab(t.id)}
               className="flex items-center justify-center gap-1.5"
               style={{
                 flex: 1,
@@ -1090,8 +1431,44 @@ export default function VoiceTrackDashboard() {
           </div>
         )}
 
-        {view === 'diario' && (<>
-
+        {/* Carosello schede: swipe a tutta altezza, le altre spuntano dal lato */}
+        <div
+          ref={pagerRef}
+            style={{
+            overflow: 'hidden',
+            minHeight: 'calc(100dvh - 150px)',
+            touchAction: 'pan-y',
+            marginLeft: '-16px',
+            marginRight: '-16px',
+            width: 'calc(100% + 32px)',
+            alignSelf: 'stretch',
+          }}
+          onTouchStart={onTabSwipeStart}
+          onTouchMove={onTabSwipeMove}
+          onTouchEnd={onTabSwipeEnd}
+          onTouchCancel={onTabSwipeEnd}
+        >
+          <div
+            style={{
+              display: 'flex',
+              width: '100%',
+              transform: `translateX(calc(${-Math.max(tabIdx, 0) * 100}% + ${tabDragX}px))`,
+              transition: tabDragging ? 'none' : 'transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1)',
+              willChange: 'transform',
+            }}
+          >
+            {/* ================= TAB DIARIO ================= */}
+            <div
+              className="flex flex-col gap-4"
+              style={{
+                flex: '0 0 100%',
+                minHeight: 'calc(100dvh - 150px)',
+                padding: '0 16px',
+                boxSizing: 'border-box',
+                pointerEvents: view === 'diario' || tabDragging ? 'auto' : 'none',
+              }}
+              aria-hidden={view !== 'diario'}
+            >
         {/* Hero readout */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr 28px', alignItems: 'center' }}>
@@ -1126,43 +1503,87 @@ export default function VoiceTrackDashboard() {
               <ChevronRight size={18} />
             </button>
           </div>
-          <div className="flex items-end gap-2 mt-2">
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
-              {Math.round(totals.kcal)}
-            </span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
-              / {target.kcal} kcal
-            </span>
-          </div>
-          <div className="flex items-center justify-between" style={{ marginTop: '2px' }}>
-            <span style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
-              {overTarget ? `Superato di ${Math.round(-remaining)} kcal` : `Restano ${Math.round(remaining)} kcal`}
-            </span>
+          <div className="flex items-end justify-between gap-2 mt-2">
+            <div className="flex items-end gap-2 min-w-0">
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
+                {Math.round(totals.kcal)}
+              </span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
+                / {target.kcal} kcal
+              </span>
+            </div>
             <button
-              onClick={() => { setTargetDraft(target); setTargetMsg(''); setTargetsOpen((v) => !v); }}
-              style={{ color: C.inkMuted, background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+              type="button"
+              onClick={() => { setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
+              style={{
+                color: C.inkMuted,
+                background: C.surfaceRaised,
+                border: `1px solid ${C.line}`,
+                borderRadius: '8px',
+                padding: '6px 10px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                flexShrink: 0,
+                marginBottom: '4px',
+              }}
             >
               <SlidersHorizontal size={12} /> Obiettivi
             </button>
           </div>
+          <div style={{ marginTop: '2px' }}>
+            <span style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
+              {overTarget ? `Superato di ${Math.round(-remaining)} kcal` : `Restano ${Math.round(remaining)} kcal`}
+            </span>
+          </div>
 
-          {/* Targets editor */}
-          {targetsOpen && (
-            <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', marginTop: '12px' }} className="flex flex-col gap-2">
-              <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>
-                OBIETTIVI GIORNALIERI
-              </span>
-              <TargetInput label="Calorie" unit="kcal" value={targetDraft.kcal} onChange={(v) => setTargetDraft((d) => ({ ...d, kcal: v }))} color={C.ink} />
-              <TargetInput label="Proteine" unit="g" value={targetDraft.proteine} onChange={(v) => setTargetDraft((d) => ({ ...d, proteine: v }))} color={C.protein} />
-              <TargetInput label="Carboidrati" unit="g" value={targetDraft.carboidrati} onChange={(v) => setTargetDraft((d) => ({ ...d, carboidrati: v }))} color={C.carbs} />
-              <TargetInput label="Grassi" unit="g" value={targetDraft.grassi} onChange={(v) => setTargetDraft((d) => ({ ...d, grassi: v }))} color={C.fat} />
-              <div className="flex items-center gap-2 mt-1">
-                <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
-                  <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
-                </button>
-                <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer' }}>
-                  Annulla
-                </button>
+          {/* Targets editor — apertura/chiusura animata (grid 0fr→1fr) */}
+          {targetsMounted && (
+            <div
+              className={`vt-edit-collapse${targetsAnimOpen ? ' is-open' : ''}`}
+              onTransitionEnd={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.propertyName !== 'grid-template-rows') return;
+                if (!targetsAnimOpen) {
+                  if (targetsCloseTimerRef.current) {
+                    clearTimeout(targetsCloseTimerRef.current);
+                    targetsCloseTimerRef.current = null;
+                  }
+                  setTargetsMounted(false);
+                }
+              }}
+            >
+              <div className="vt-edit-collapse-inner" style={{ pointerEvents: targetsOpen && targetsAnimOpen ? 'auto' : 'none' }}>
+                <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', marginTop: '12px' }} className="flex flex-col gap-2">
+                  <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>
+                    OBIETTIVI GIORNALIERI
+                  </span>
+                  <span style={{ fontSize: '10px', color: C.inkFaint }}>
+                    Trascina gli slider in modo indipendente: per salvare la ripartizione deve totalizzare 100%. I grammi si ricavano dalle calorie.
+                  </span>
+                  <TargetInput label="Calorie" unit="kcal" value={targetDraft.kcal} onChange={onTargetKcalChange} color={C.ink} />
+                  <MacroSlider label="Proteine" pct={macroPct.p} grams={draftGrams.proteine} onChange={(v) => setMacroSlider('p', v)} color={C.protein} />
+                  <MacroSlider label="Carboidrati" pct={macroPct.c} grams={draftGrams.carboidrati} onChange={(v) => setMacroSlider('c', v)} color={C.carbs} />
+                  <MacroSlider label="Grassi" pct={macroPct.g} grams={draftGrams.grassi} onChange={(v) => setMacroSlider('g', v)} color={C.fat} />
+                  <div style={{ fontSize: '11px', color: macroSum === 100 ? C.inkFaint : C.alert, fontFamily: "'IBM Plex Mono', monospace", marginTop: '2px' }}>
+                    Ripartizione: {macroPct.p}% P · {macroPct.c}% C · {macroPct.g}% G = {macroSum}%
+                  </div>
+                  {targetMsg && (
+                    <div style={{ fontSize: '11px', color: /^(Serve|Errore)/.test(targetMsg) ? C.alert : C.good }}>
+                      {targetMsg}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2 mt-1">
+                    <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
+                      <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
+                    </button>
+                    <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer' }}>
+                      Annulla
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -1200,13 +1621,47 @@ export default function VoiceTrackDashboard() {
                 <UtensilsCrossed size={18} color={C.inkFaint} />
               </div>
             </div>
-            <div className="flex flex-col gap-2 flex-1">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', flex: 1 }}>
               <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={target.proteine} color={C.protein} />
               <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={target.carboidrati} color={C.carbs} />
               <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={target.grassi} color={C.fat} />
             </div>
           </div>
         </div>
+
+        {/* Azioni rapide: testo / barcode / voce → tab Traccia o Scan */}
+        {dayOffset === 0 && (
+          <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '16px 20px' }}>
+            <div className="flex items-center" style={{ justifyContent: 'space-around' }}>
+              {[
+                { id: 'text', label: 'TESTO', aria: 'Scrivi un pasto', icon: <Keyboard size={22} />, action: 'text' },
+                { id: 'scan', label: 'SCAN', aria: 'Scansiona un barcode', icon: <ScanLine size={22} />, action: 'scan' },
+                { id: 'voice', label: 'VOCE', aria: 'Registra a voce', icon: <Mic size={22} />, action: 'voice' },
+              ].map((btn) => (
+                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => launchQuickAction(btn.action)}
+                    aria-label={btn.aria}
+                    style={{
+                      width: '60px', height: '60px', borderRadius: '999px',
+                      border: `1px solid ${C.line}`,
+                      background: C.surfaceRaised,
+                      color: C.ink,
+                      cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}
+                  >
+                    {btn.icon}
+                  </button>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em' }}>
+                    {btn.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Meal log */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
@@ -1265,16 +1720,61 @@ export default function VoiceTrackDashboard() {
           )}
         </div>
 
-        {/* Weekly trend */}
+        {/* Trend: settimana / mese / anno */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <span style={{ fontSize: '12px', color: C.inkMuted }}>Ultimi 7 giorni</span>
-          <div style={{ height: '110px', marginTop: '8px' }}>
+          <div className="flex items-center justify-between" style={{ gap: '8px', marginBottom: '10px' }}>
+            <span style={{ fontSize: '12px', color: C.inkMuted, flex: 1, minWidth: 0 }}>
+              {TREND_TITLE[trendRange]}
+            </span>
+          </div>
+          <div
+            className="flex"
+            style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '3px', gap: '2px', marginBottom: '10px' }}
+          >
+            {TREND_RANGES.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => setTrendRange(r.id)}
+                style={{
+                  flex: 1,
+                  background: trendRange === r.id ? C.surfaceRaised : 'transparent',
+                  color: trendRange === r.id ? C.ink : C.inkMuted,
+                  border: trendRange === r.id ? `1px solid ${C.line}` : '1px solid transparent',
+                  borderRadius: '6px',
+                  padding: '6px 4px',
+                  fontSize: '11px',
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  fontWeight: trendRange === r.id ? 600 : 400,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                }}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ height: '110px' }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={week} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
-                <XAxis dataKey="label" tick={{ fill: C.inkFaint, fontSize: 11 }} axisLine={{ stroke: C.line }} tickLine={false} />
+              <BarChart data={trendData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+                <XAxis
+                  dataKey="label"
+                  tick={<WeekAxisTick week={trendData} selectedDate={selectedDateStr} onSelect={goToDate} />}
+                  axisLine={{ stroke: C.line }}
+                  tickLine={false}
+                />
                 <ReferenceLine y={target.kcal} stroke={C.inkFaint} strokeDasharray="3 3" />
-                <Bar dataKey="kcal" radius={[4, 4, 0, 0]}>
-                  {week.map((d, i) => <Cell key={i} fill={d.kcal > target.kcal ? C.alert : C.good} opacity={0.85} />)}
+                <Bar dataKey="kcal" radius={[4, 4, 0, 0]} onClick={(d) => goToDate(d?.date)}>
+                  {trendData.map((d, i) => (
+                    <Cell
+                      key={i}
+                      fill={d.kcal > target.kcal ? C.alert : C.good}
+                      opacity={d.date === selectedDateStr ? 1 : 0.85}
+                      stroke={d.date === selectedDateStr ? C.ink : 'none'}
+                      strokeWidth={d.date === selectedDateStr ? 1 : 0}
+                      cursor={d.date ? 'pointer' : 'default'}
+                    />
+                  ))}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -1290,12 +1790,20 @@ export default function VoiceTrackDashboard() {
                 ? `Aggiornato alle ${lastSync.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · si aggiorna da solo`
                 : 'Aggiornato ora'}
         </div>
-
-        </>)}
+            </div>
 
         {/* ================= TAB TRACCIA ================= */}
-        {view === 'traccia' && (
-          <div className="flex flex-col gap-4">
+            <div
+              className="flex flex-col gap-4"
+              style={{
+                flex: '0 0 100%',
+                minHeight: 'calc(100dvh - 150px)',
+                padding: '0 16px',
+                boxSizing: 'border-box',
+                pointerEvents: view === 'traccia' || tabDragging ? 'auto' : 'none',
+              }}
+              aria-hidden={view !== 'traccia'}
+            >
 
             {/* Scheda microfono */}
             <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '28px 20px' }} className="flex flex-col items-center gap-3">
@@ -1352,6 +1860,7 @@ export default function VoiceTrackDashboard() {
                   {/* Input digitato: stessa pipeline, fonte = pwa-testo */}
                   <div className="flex items-center w-full" style={{ gap: '8px', marginTop: '4px' }}>
                     <input
+                      ref={typedInputRef}
                       value={typedText}
                       onChange={(e) => setTypedText(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') submitTyped(); }}
@@ -1455,12 +1964,20 @@ export default function VoiceTrackDashboard() {
             <div style={{ fontSize: '11px', color: C.inkFaint, textAlign: 'center', paddingBottom: '4px' }}>
               Riconoscimento in italiano (it-IT) · fonte sul foglio: "pwa-voce" o "pwa-testo"
             </div>
-          </div>
-        )}
+            </div>
 
         {/* ================= TAB SCAN (Deploy 4) ================= */}
-        {view === 'scan' && (
-          <div className="flex flex-col gap-4">
+            <div
+              className="flex flex-col gap-4"
+              style={{
+                flex: '0 0 100%',
+                minHeight: 'calc(100dvh - 150px)',
+                padding: '0 16px',
+                boxSizing: 'border-box',
+                pointerEvents: view === 'scan' || tabDragging ? 'auto' : 'none',
+              }}
+              aria-hidden={view !== 'scan'}
+            >
 
             {/* Scheda scanner */}
             <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '24px 20px' }} className="flex flex-col items-center gap-3">
@@ -1476,7 +1993,7 @@ export default function VoiceTrackDashboard() {
                 </div>
               ) : scanState === 'scanning' ? (
                 <>
-                  <div style={{ width: '100%', borderRadius: '10px', overflow: 'hidden', border: `1px solid ${C.good}`, position: 'relative' }}>
+                  <div data-no-tab-swipe style={{ width: '100%', borderRadius: '10px', overflow: 'hidden', border: `1px solid ${C.good}`, position: 'relative' }}>
                     <video
                       ref={videoRef}
                       playsInline
@@ -1600,7 +2117,7 @@ export default function VoiceTrackDashboard() {
                   <span>{scanNotFound}</span>
                 </div>
                 <button
-                  onClick={() => setView('traccia')}
+                  onClick={() => goToTab('traccia')}
                   style={{ alignSelf: 'flex-start', background: 'transparent', color: C.good, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}
                 >
                   Registralo a voce →
@@ -1652,8 +2169,9 @@ export default function VoiceTrackDashboard() {
             <div style={{ fontSize: '11px', color: C.inkFaint, textAlign: 'center', paddingBottom: '4px' }}>
               Open Food Facts · EAN-13 / EAN-8 · fonte sul foglio: "pwa-barcode"
             </div>
+            </div>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
@@ -1661,8 +2179,9 @@ export default function VoiceTrackDashboard() {
 
 // ---------------------------------------------------------------------------
 // Riga pasto con edit/delete (Deploy 5 §7.2).
-// - tap sulla riga (se editabile) → pannello di modifica inline
-// - swipe verso sinistra → box di conferma eliminazione
+// - tap sulla riga con pannello aperto → chiude modifica o conferma eliminazione
+// - swipe sx→dx → modifica
+// - swipe dx→sx → box di conferma eliminazione
 // - pulsante Elimina nel pannello → stesso box di conferma
 // Le righe non editabili (demo o storiche "legacy-*") restano di sola lettura.
 // ---------------------------------------------------------------------------
@@ -1675,13 +2194,83 @@ function MealRow({
   const fonteLabel = String(meal.fonte || '').includes('barcode')
     ? 'barcode' : meal.fonte === 'pwa-testo' ? 'testo' : 'voce';
   const setField = (k, v) => setEditDraft((d) => ({ ...(d || {}), [k]: v }));
-  const canTap = editable && swipeX === 0 && !confirming && !isEditing;
+  const handleRowClick = () => {
+    if (!editable || swipeX !== 0) return;
+    if (isEditing) {
+      onCloseEdit();
+      return;
+    }
+    if (confirming) {
+      onCancelDelete();
+      return;
+    }
+    onOpenEdit(meal);
+  };
+
+  // Pannello edit: montato durante exit così altezza/opacità possono chiudersi.
+  const wantPanel = Boolean(isEditing && editDraft && !confirming);
+  const [panelMounted, setPanelMounted] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [draftSnap, setDraftSnap] = useState(null);
+  const closeTimerRef = useRef(null);
+  const panelMountedRef = useRef(false);
+  panelMountedRef.current = panelMounted;
+
+  useEffect(() => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    if (wantPanel) {
+      setDraftSnap(editDraft);
+      setPanelMounted(true);
+      const raf = requestAnimationFrame(() => {
+        requestAnimationFrame(() => setPanelOpen(true));
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    if (panelMountedRef.current) {
+      setPanelOpen(false);
+      closeTimerRef.current = setTimeout(() => {
+        setPanelMounted(false);
+        setDraftSnap(null);
+        closeTimerRef.current = null;
+      }, 300);
+    }
+    return () => {
+      if (closeTimerRef.current) {
+        clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+    };
+  }, [wantPanel]); // eslint-disable-line react-hooks/exhaustive-deps -- solo toggle open/close
+
+  // Tenere lo snapshot allineato mentre si digita (solo a pannello aperto).
+  useEffect(() => {
+    if (wantPanel && editDraft) setDraftSnap(editDraft);
+  }, [wantPanel, editDraft]);
+
+  const shownDraft = (wantPanel ? editDraft : draftSnap) || draftSnap;
 
   return (
     <div style={{ borderTop: `1px solid ${C.line}` }}>
       {/* Riga con swipe */}
       <div style={{ position: 'relative', overflow: 'hidden' }}>
-        {/* Pulsante elimina rivelato sotto durante lo swipe */}
+        {/* Pulsante modifica rivelato sotto durante swipe sx→dx */}
+        {editable && (
+          <button
+            onClick={() => onOpenEdit(meal)}
+            aria-label="Modifica"
+            style={{
+              position: 'absolute', top: 0, left: 0, bottom: 0, width: '80px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: C.good, color: C.bg, border: 'none', cursor: 'pointer',
+            }}
+          >
+            <Pencil size={18} />
+          </button>
+        )}
+        {/* Pulsante elimina rivelato sotto durante swipe dx→sx */}
         {editable && (
           <button
             onClick={() => onAskDelete(meal.id)}
@@ -1697,30 +2286,60 @@ function MealRow({
         )}
         {/* Contenuto riga (sopra) */}
         <div
-          onTouchStart={editable ? (e) => onTouchStart(meal, e) : undefined}
-          onTouchMove={editable ? (e) => onTouchMove(meal, e) : undefined}
-          onTouchEnd={editable ? () => onTouchEnd(meal) : undefined}
-          onClick={canTap ? () => onOpenEdit(meal) : undefined}
-          className="flex items-center justify-between"
+          data-no-tab-swipe
+          onTouchStart={editable ? (e) => { e.stopPropagation(); onTouchStart(meal, e); } : undefined}
+          onTouchMove={editable ? (e) => { e.stopPropagation(); onTouchMove(meal, e); } : undefined}
+          onTouchEnd={editable ? (e) => { e.stopPropagation(); onTouchEnd(meal); } : undefined}
+          onClick={handleRowClick}
           style={{
-            padding: '6px 0', background: C.surface,
+            display: 'flex', flexDirection: 'column', gap: '3px',
+            padding: '8px 0', background: C.surface,
+            position: 'relative',
+            paddingRight: editable && !isEditing && !confirming ? '42px' : 0,
             transform: `translateX(${swipeX}px)`,
             transition: active ? 'none' : 'transform 0.18s ease',
             cursor: editable ? 'pointer' : 'default',
           }}
         >
-          <div className="flex flex-col">
-            <span style={{ fontSize: '13px' }}>{meal.alimento}</span>
-            <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
-              {meal.time} · {meal.grammi}g · {fonteLabel}
-            </span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
+            <span style={{ fontSize: '13px', textAlign: 'left' }}>{meal.alimento}</span>
           </div>
-          <div className="flex items-center" style={{ gap: '8px', flexShrink: 0, paddingLeft: '10px' }}>
-            {editable && <Pencil size={13} color={C.inkFaint} />}
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color: C.inkMuted }}>
-              {Math.round(meal.kcal)}
-            </span>
-          </div>
+          <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {meal.time} · {meal.grammi}g · {fonteLabel}
+          </span>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '12px', color: C.inkMuted }}>
+            {Math.round(meal.kcal)} kcal ·{' '}
+            <span style={{ color: C.protein }}>{Math.round(meal.proteine)}P</span>{' '}
+            <span style={{ color: C.carbs }}>{Math.round(meal.carboidrati)}C</span>{' '}
+            <span style={{ color: C.fat }}>{Math.round(meal.grassi)}G</span>
+          </span>
+          {editable && !isEditing && !confirming && (
+            <button
+              type="button"
+              aria-label="Modifica"
+              onClick={(e) => { e.stopPropagation(); onOpenEdit(meal); }}
+              style={{
+                position: 'absolute',
+                right: '6px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '32px',
+                height: '32px',
+                padding: 0,
+                background: C.surfaceRaised,
+                border: `1px solid ${C.line}`,
+                borderRadius: '8px',
+                color: C.inkMuted,
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              <Pencil size={15} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -1739,37 +2358,55 @@ function MealRow({
         </div>
       )}
 
-      {/* Pannello di modifica inline (nascosto mentre si conferma l'eliminazione) */}
-      {isEditing && editDraft && !confirming && (
-        <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', margin: '8px 0' }} className="flex flex-col gap-2">
-          <div className="flex flex-col gap-1">
-            <label style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>ALIMENTO</label>
-            <input
-              value={editDraft.alimento}
-              onChange={(e) => setField('alimento', e.target.value)}
-              style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}
-            />
-          </div>
-          <TargetInput label="Grammi" unit="g" value={editDraft.grammi} onChange={(v) => setField('grammi', v)} color={C.ink} />
-          <TargetInput label="Calorie" unit="kcal" value={editDraft.kcal} onChange={(v) => setField('kcal', v)} color={C.ink} />
-          <TargetInput label="Proteine" unit="g" value={editDraft.proteine} onChange={(v) => setField('proteine', v)} color={C.protein} />
-          <TargetInput label="Carboidrati" unit="g" value={editDraft.carboidrati} onChange={(v) => setField('carboidrati', v)} color={C.carbs} />
-          <TargetInput label="Grassi" unit="g" value={editDraft.grassi} onChange={(v) => setField('grassi', v)} color={C.fat} />
-          {editError && (
-            <div className="flex items-start gap-2" style={{ color: C.alert, fontSize: '12px' }}>
-              <AlertCircle size={13} style={{ marginTop: '2px', flexShrink: 0 }} /><span>{editError}</span>
+      {/* Pannello di modifica inline — apertura/chiusura animata (grid 0fr→1fr) */}
+      {panelMounted && shownDraft && (
+        <div
+          className={`vt-edit-collapse${panelOpen ? ' is-open' : ''}`}
+          onTransitionEnd={(e) => {
+            if (e.target !== e.currentTarget) return;
+            if (e.propertyName !== 'grid-template-rows') return;
+            if (!panelOpen) {
+              if (closeTimerRef.current) {
+                clearTimeout(closeTimerRef.current);
+                closeTimerRef.current = null;
+              }
+              setPanelMounted(false);
+              setDraftSnap(null);
+            }
+          }}
+        >
+          <div className="vt-edit-collapse-inner" style={{ pointerEvents: wantPanel && panelOpen ? 'auto' : 'none' }}>
+            <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', margin: '8px 0' }} className="flex flex-col gap-2">
+              <div className="flex flex-col gap-1">
+                <label style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>ALIMENTO</label>
+                <input
+                  value={shownDraft.alimento}
+                  onChange={(e) => setField('alimento', e.target.value)}
+                  style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}
+                />
+              </div>
+              <TargetInput label="Grammi" unit="g" value={shownDraft.grammi} onChange={(v) => setField('grammi', v)} color={C.ink} />
+              <TargetInput label="Calorie" unit="kcal" value={shownDraft.kcal} onChange={(v) => setField('kcal', v)} color={C.ink} />
+              <TargetInput label="Proteine" unit="g" value={shownDraft.proteine} onChange={(v) => setField('proteine', v)} color={C.protein} />
+              <TargetInput label="Carboidrati" unit="g" value={shownDraft.carboidrati} onChange={(v) => setField('carboidrati', v)} color={C.carbs} />
+              <TargetInput label="Grassi" unit="g" value={shownDraft.grassi} onChange={(v) => setField('grassi', v)} color={C.fat} />
+              {editError && wantPanel && (
+                <div className="flex items-start gap-2" style={{ color: C.alert, fontSize: '12px' }}>
+                  <AlertCircle size={13} style={{ marginTop: '2px', flexShrink: 0 }} /><span>{editError}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-2 mt-1">
+                <button onClick={() => onSave(meal)} disabled={editBusy} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: editBusy ? 'default' : 'pointer', opacity: editBusy ? 0.6 : 1 }} className="flex items-center gap-1">
+                  {editBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} {editBusy ? 'Salvo…' : 'Salva'}
+                </button>
+                <button onClick={() => onAskDelete(meal.id)} disabled={editBusy} style={{ background: 'transparent', color: C.alert, border: `1px solid ${C.alert}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: editBusy ? 'default' : 'pointer' }} className="flex items-center gap-1">
+                  <Trash2 size={14} /> Elimina
+                </button>
+                <button onClick={onCloseEdit} disabled={editBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer', marginLeft: 'auto' }}>
+                  Annulla
+                </button>
+              </div>
             </div>
-          )}
-          <div className="flex items-center gap-2 mt-1">
-            <button onClick={() => onSave(meal)} disabled={editBusy} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: editBusy ? 'default' : 'pointer', opacity: editBusy ? 0.6 : 1 }} className="flex items-center gap-1">
-              {editBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} {editBusy ? 'Salvo…' : 'Salva'}
-            </button>
-            <button onClick={() => onAskDelete(meal.id)} disabled={editBusy} style={{ background: 'transparent', color: C.alert, border: `1px solid ${C.alert}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: editBusy ? 'default' : 'pointer' }} className="flex items-center gap-1">
-              <Trash2 size={14} /> Elimina
-            </button>
-            <button onClick={onCloseEdit} disabled={editBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer', marginLeft: 'auto' }}>
-              Annulla
-            </button>
           </div>
         </div>
       )}
@@ -1798,8 +2435,67 @@ function TargetInput({ label, unit, value, onChange, color }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Slider di ripartizione per un macro (Deploy 5 §7.2): riga con etichetta,
+// % corrente e grammi derivati (da split + kcal), poi la barra regolabile.
+// `accentColor` colora traccia e pallino nel colore del macro (funziona con il
+// touch su Chrome/Android, il target di test del progetto).
+// ---------------------------------------------------------------------------
+function MacroSlider({ label, pct, grams, onChange, color }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div style={{ width: 6, height: 6, borderRadius: 999, background: color }} />
+          <span style={{ fontSize: '13px' }}>{label}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color, minWidth: '38px', textAlign: 'right' }}>{pct}%</span>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkFaint, width: '52px', textAlign: 'right' }}>{Math.round(grams)} g</span>
+        </div>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={pct}
+        onChange={(e) => onChange(Number(e.target.value))}
+        aria-label={`Percentuale ${label}`}
+        style={{ width: '100%', accentColor: color, cursor: 'pointer' }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Etichetta cliccabile sull'asse X del grafico trend: tocca il nome
+// (giorno / settimana / mese) o la colonna e ti porta nel Diario su quella
+// data. Recharts clona questo elemento passandogli x/y/payload/index;
+// `week`/`selectedDate`/`onSelect` arrivano dalle prop passate a mano
+// (`week` = serie attiva del trend, non solo la vista settimanale).
+// ---------------------------------------------------------------------------
+function WeekAxisTick({ x, y, payload, index, week, selectedDate, onSelect }) {
+  const item = (typeof index === 'number' && week[index]) || week.find((w) => w.label === payload.value);
+  const clickable = !!item?.date;
+  const isSelected = clickable && item.date === selectedDate;
+  return (
+    <g
+      transform={`translate(${x},${y})`}
+      onClick={clickable ? () => onSelect(item.date) : undefined}
+      style={{ cursor: clickable ? 'pointer' : 'default' }}
+    >
+      {/* Area di tap allargata (invisibile), il testo da solo e' troppo piccolo su mobile */}
+      <rect x={-16} y={-2} width={32} height={22} fill="transparent" />
+      <text x={0} y={0} dy={13} textAnchor="middle" fontSize={11} fontWeight={isSelected ? 600 : 400} fill={isSelected ? C.ink : C.inkFaint}>
+        {payload.value}
+      </text>
+    </g>
+  );
+}
+
 function MacroRow({ icon, label, grams, target, color }) {
-  const pct = Math.min((grams / Math.max(target, 1)) * 100, 100);
+  const barPct = Math.min((grams / Math.max(target, 1)) * 100, 100);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between">
@@ -1812,7 +2508,7 @@ function MacroRow({ icon, label, grams, target, color }) {
         </span>
       </div>
       <div style={{ height: '4px', borderRadius: '999px', background: '#2B352F' }}>
-        <div style={{ width: `${pct}%`, height: '100%', borderRadius: '999px', background: color }} />
+        <div style={{ width: `${barPct}%`, height: '100%', borderRadius: '999px', background: color }} />
       </div>
     </div>
   );

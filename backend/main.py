@@ -7,7 +7,7 @@ import functions_framework
 import json
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 from llm_client import parse_meal_with_llm
 from sheets_client import (
@@ -571,7 +571,7 @@ def _handle_dashboard(request):
     """
     Endpoint GET /dashboard
     Ritorna il pacchetto dati completo per la webapp: pasti di oggi,
-    trend ultimi 7 giorni, target. Una sola lettura del foglio pasti.
+    trend (settimana / mese / anno), target. Una sola lettura del foglio pasti.
     """
     try:
         today = datetime.now(TZ_ITALY).date()
@@ -598,12 +598,14 @@ def _handle_dashboard(request):
                 "fonte": m["fonte"] or "voce",
             })
 
-        # Trend settimanale dalle stesse righe gia' lette
+        # Trend dalle stesse righe gia' lette
         kcal_by_date = {}
         for m in all_rows:
             kcal_by_date[m["date"]] = kcal_by_date.get(m["date"], 0) + m["kcal"]
 
-        from sheets_client import WEEKDAY_IT
+        from sheets_client import WEEKDAY_IT, MONTH_IT
+
+        # Ultimi 7 giorni (kcal giornaliere)
         settimana = []
         for j in range(6, -1, -1):
             d = today - timedelta(days=j)
@@ -612,6 +614,51 @@ def _handle_dashboard(request):
                 "label": WEEKDAY_IT[d.weekday()],
                 "date": d_str,
                 "kcal": round(kcal_by_date.get(d_str, 0), 1),
+            })
+
+        # Ultime 5 settimane rolling (7 giorni ciascuna): media giornaliera
+        # sul bucket (giorni senza pasti contano 0). date = inizio bucket.
+        mensile = []
+        for w in range(4, -1, -1):
+            start = today - timedelta(days=(w * 7) + 6)
+            day_totals = []
+            for i in range(7):
+                d = start + timedelta(days=i)
+                day_totals.append(kcal_by_date.get(d.strftime("%Y-%m-%d"), 0))
+            avg = round(sum(day_totals) / 7, 1) if any(day_totals) else 0
+            mensile.append({
+                "label": f"{start.day}/{start.month}",
+                "date": start.strftime("%Y-%m-%d"),
+                "kcal": avg,
+            })
+
+        # Ultimi 12 mesi di calendario: media giornaliera sui giorni con
+        # almeno un pasto (0 se nessun pasto nel mese).
+        annuale = []
+        for m_offset in range(11, -1, -1):
+            # Primo giorno del mese m_offset mesi fa
+            y = today.year
+            mo = today.month - m_offset
+            while mo <= 0:
+                mo += 12
+                y -= 1
+            month_start = date(y, mo, 1)
+            if mo == 12:
+                month_end = date(y + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(y, mo + 1, 1) - timedelta(days=1)
+            logged = []
+            d = month_start
+            while d <= month_end:
+                d_str = d.strftime("%Y-%m-%d")
+                if d_str in kcal_by_date:
+                    logged.append(kcal_by_date[d_str])
+                d += timedelta(days=1)
+            avg = round(sum(logged) / len(logged), 1) if logged else 0
+            annuale.append({
+                "label": MONTH_IT[mo - 1],
+                "date": month_start.strftime("%Y-%m-%d"),
+                "kcal": avg,
             })
 
         target = get_config_targets()
@@ -624,6 +671,8 @@ def _handle_dashboard(request):
                 "totale": _totals(oggi_rows),
             },
             "storico_settimanale": settimana,
+            "storico_mensile": mensile,
+            "storico_annuale": annuale,
             "target": target,
         })
 

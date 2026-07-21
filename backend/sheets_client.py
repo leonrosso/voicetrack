@@ -41,6 +41,9 @@ _TARGET_KEYS = ["kcal", "proteine", "carboidrati", "grassi"]
 # Etichette giorni settimana in italiano (lunedi' = 0, come datetime.weekday()).
 WEEKDAY_IT = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"]
 
+# Etichette mesi in italiano (gennaio = 0).
+MONTH_IT = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"]
+
 # Cache dei titoli delle tab esistenti, valida per la durata dell'istanza "calda"
 # della Cloud Function (si azzera ad ogni nuovo deploy o cold start).
 _sheet_titles_cache = None
