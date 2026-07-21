@@ -14,6 +14,12 @@
 
 ---
 
+## 2026-07-21 — Layout navigazione giorno nel Diario (Cursor)
+**Fatto:** fix layout barra giorno nella hero card del tab Diario in `frontend/src/App.jsx`: le classi utility `flex`/`justify-between` non erano definite nel CSS del progetto, quindi frecce e refresh si impilavano in colonna. Sostituite con grid a 3 colonne (28px | 1fr | 28px) e flex centrato sulla colonna centrale — freccia indietro a sinistra, avanti a destra, etichetta data + refresh (o «Oggi») al centro.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso layout navigazione giorno (frecce verticali + refresh disallineato a sinistra). Invariati gli altri bug aperti (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verifica visiva su telefono con `npm run dev`; deploy Vercel quando pronto.
+
 ## 2026-07-20 — Edit/delete pasti nella PWA (Claude Code)
 **Fatto:** implementata in `frontend/src/App.jsx` la modifica e l'eliminazione di un pasto dal Diario (Sessione 2 §7.2, parte edit/delete). Tap su una riga → pannello di modifica inline (alimento + grammi/kcal/macro, riuso di `TargetInput`) → `POST /update_meal`. Eliminazione con conferma inline, raggiungibile in due modi: pulsante «Elimina» nel pannello **e** swipe-to-delete sulla riga → `POST /delete_meal`. Dopo ogni mutazione: refresh del giorno mostrato (`fetchLive` per oggi, con riscrittura di `vt-cache`; ricarico via `historyTick` per i giorni passati). Gating: azioni attive solo in modalità live e su righe con `id` reale; le righe storiche `legacy-*` e la modalità demo restano di sola lettura. Fix collaterale: il loader dei giorni passati preserva l'`id` UUID reale (prima lo sovrascriveva con un indice). Il backend (Sessione 1: colonna `id`, `/update_meal`, `/delete_meal`) era già presente nel codice — nessuna modifica backend, ma va (ri)deployato perché gli endpoint siano live.
 **Nuove superfici/config:** nessuna nuova config. Verificato con build Vite + smoke test browser (demo read-only; live con backend mock: update/delete chiamati con `id` corretto, righe legacy non editabili, nessun errore runtime).

@@ -1094,16 +1094,16 @@ export default function VoiceTrackDashboard() {
 
         {/* Hero readout */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <div className="flex items-center justify-between">
+          <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr 28px', alignItems: 'center' }}>
             <button
               onClick={() => setDayOffset((o) => o - 1)}
               disabled={!config.apiUrl}
               aria-label="Giorno precedente"
-              style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', opacity: config.apiUrl ? 1 : 0.4 }}
+              style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', justifyContent: 'center', width: '28px', flexShrink: 0, opacity: config.apiUrl ? 1 : 0.4 }}
             >
               <ChevronLeft size={18} />
             </button>
-            <div className="flex items-center" style={{ gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
               <span style={{ fontSize: '12px', color: dayOffset === 0 ? C.inkMuted : C.ink }}>
                 {dayOffset === 0 ? dayLabel() : dayLabel(selectedDate)}
               </span>
@@ -1121,7 +1121,7 @@ export default function VoiceTrackDashboard() {
               onClick={() => setDayOffset((o) => Math.min(o + 1, 0))}
               disabled={dayOffset === 0}
               aria-label="Giorno successivo"
-              style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', opacity: dayOffset === 0 ? 0.3 : 1 }}
+              style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', justifyContent: 'center', width: '28px', flexShrink: 0, opacity: dayOffset === 0 ? 0.3 : 1 }}
             >
               <ChevronRight size={18} />
             </button>
