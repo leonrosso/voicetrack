@@ -1403,7 +1403,20 @@ export default function VoiceTrackDashboard() {
   const statusText = status === 'live' ? 'Connesso' : status === 'error' ? 'Dati demo · errore connessione' : status === 'loading' ? 'Caricamento…' : 'Dati demo';
 
   return (
-    <div style={{ background: C.bg, color: C.ink, fontFamily: "'IBM Plex Sans', sans-serif", minHeight: '600px' }} className="w-full flex justify-center p-4">
+    <div
+      style={{
+        background: C.bg,
+        color: C.ink,
+        fontFamily: "'IBM Plex Sans', sans-serif",
+        minHeight: '600px',
+        paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
+        paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
+        paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
+        boxSizing: 'border-box',
+      }}
+      className="w-full flex justify-center"
+    >
       <style>{FONT_IMPORT + EXTRA_CSS}</style>
       <div className="w-full flex flex-col gap-4" style={{ maxWidth: '420px' }}>
 
@@ -1541,7 +1554,7 @@ export default function VoiceTrackDashboard() {
             flexDirection: 'column',
             gap: 0,
             minHeight: 'calc(100dvh - 150px)',
-            paddingBottom: '22px',
+            paddingBottom: 'calc(22px + env(safe-area-inset-bottom, 0px))',
             boxSizing: 'border-box',
             flexShrink: 0,
           }}

@@ -14,6 +14,12 @@
 
 ---
 
+## 2026-07-21 — PWA safe-area: margine sotto Grassi in standalone (Cursor)
+**Fatto:** fix viewport PWA standalone — in `frontend/index.html` meta `viewport-fit=cover`; wrapper root con padding `env(safe-area-inset-*)`; fold Diario `paddingBottom: calc(22px + env(safe-area-inset-bottom))` (box-sizing border-box); `#root` a `min-height: 100dvh`. Il `100dvh` c’era già; il bug era l’area gesture Android non sottratta senza safe-area.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) margine assente sotto card Grassi in PWA installata vs ok in Chrome/`npm run dev`. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare **solo** dopo deploy Vercel + reinstall/apertura PWA standalone sul telefono (non basta `npm run dev` in browser).
+
 ## 2026-07-21 — Obiettivi: ritorno un solo atto / gate sync (Cursor)
 **Fatto:** annullato il solo-allineamento durate (#3) come strategia. Data, gauge e readout usano il gate `targetsOpen || targetsAnimOpen` (non più `targetsMounted`): in chiusura tornano **nello stesso istante** di azioni/macro ed editor che collassa — un solo atto invece del buco ~300ms. Durate reveal 0.28s.
 **Nuove superfici/config:** nessuna.
