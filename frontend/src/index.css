@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
+:root {
+  /* Fallback finché lo script in index.html / React non impostano i px reali */
+  --app-height: 100dvh;
+}
+
 body { margin: 0; }
 
 #root {
   width: 100%;
-  min-height: 100dvh;
+  min-height: var(--app-height);
 }

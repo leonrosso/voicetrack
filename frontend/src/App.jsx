@@ -421,6 +421,30 @@ export default function VoiceTrackDashboard() {
     };
   }, [targetsMounted]);
 
+  // --app-height da visualViewport: su Android PWA 100dvh al refresh diventa più alto
+  // (include gesture bar) e slarga il fold. Lo script in index.html fa il primo set;
+  // qui teniamo i listener anche dopo il mount React.
+  useEffect(() => {
+    const setAppHeight = () => {
+      const h = window.visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty('--app-height', `${Math.round(h)}px`);
+    };
+    setAppHeight();
+    window.addEventListener('resize', setAppHeight);
+    window.addEventListener('orientationchange', setAppHeight);
+    window.addEventListener('pageshow', setAppHeight);
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', setAppHeight);
+    vv?.addEventListener('scroll', setAppHeight);
+    return () => {
+      window.removeEventListener('resize', setAppHeight);
+      window.removeEventListener('orientationchange', setAppHeight);
+      window.removeEventListener('pageshow', setAppHeight);
+      vv?.removeEventListener('resize', setAppHeight);
+      vv?.removeEventListener('scroll', setAppHeight);
+    };
+  }, []);
+
   // Load saved endpoint config on mount.
   useEffect(() => {
     (async () => {
@@ -1513,7 +1537,7 @@ export default function VoiceTrackDashboard() {
           ref={pagerRef}
             style={{
             overflow: 'hidden',
-            minHeight: 'calc(100dvh - 150px)',
+            minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
             touchAction: 'pan-y',
             marginLeft: '-16px',
             marginRight: '-16px',
@@ -1539,7 +1563,7 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
-                minHeight: 'calc(100dvh - 150px)',
+                minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
                 pointerEvents: view === 'diario' || tabDragging ? 'auto' : 'none',
@@ -1553,8 +1577,8 @@ export default function VoiceTrackDashboard() {
             display: 'flex',
             flexDirection: 'column',
             gap: 0,
-            minHeight: 'calc(100dvh - 150px)',
-            paddingBottom: 'calc(22px + env(safe-area-inset-bottom, 0px))',
+            minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
+            paddingBottom: 'max(40px, env(safe-area-inset-bottom, 0px))',
             boxSizing: 'border-box',
             flexShrink: 0,
           }}
@@ -2009,7 +2033,7 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
-                minHeight: 'calc(100dvh - 150px)',
+                minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
                 pointerEvents: view === 'traccia' || tabDragging ? 'auto' : 'none',
@@ -2183,7 +2207,7 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
-                minHeight: 'calc(100dvh - 150px)',
+                minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
                 pointerEvents: view === 'scan' || tabDragging ? 'auto' : 'none',

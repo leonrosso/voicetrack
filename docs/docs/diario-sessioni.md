@@ -14,6 +14,12 @@
 
 ---
 
+## 2026-07-21 — PWA: --app-height stabile cold start vs refresh (Cursor)
+**Fatto:** su Android standalone `100dvh` al refresh diventa più alto e slarga il fold. Introdotto `--app-height` da `visualViewport.height` (script early in `index.html` + `useEffect` in `App.jsx`); tutti i `minHeight: calc(100dvh - 150px)` → `calc(var(--app-height) - 150px)`; fold `paddingBottom: max(40px, env(safe-area-inset-bottom))`.
+**Nuove superfici/config:** CSS var `--app-height`.
+**Bug aperti/chiusi:** mirato layout ok all’apertura ma slargato dopo un refresh. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** deploy Vercel; verifica su PWA installata: apri da icona → ok; refresh → deve restare uguale (non slargarsi).
+
 ## 2026-07-21 — PWA safe-area: margine sotto Grassi in standalone (Cursor)
 **Fatto:** fix viewport PWA standalone — in `frontend/index.html` meta `viewport-fit=cover`; wrapper root con padding `env(safe-area-inset-*)`; fold Diario `paddingBottom: calc(22px + env(safe-area-inset-bottom))` (box-sizing border-box); `#root` a `min-height: 100dvh`. Il `100dvh` c’era già; il bug era l’area gesture Android non sottratta senza safe-area.
 **Nuove superfici/config:** nessuna.
