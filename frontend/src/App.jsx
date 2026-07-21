@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  Settings, X, RefreshCw, SlidersHorizontal,
+  Settings, X, SlidersHorizontal,
   Beef, Wheat, Droplet, Mic, AlertCircle, Check, UtensilsCrossed,
   LayoutGrid, Volume2, Loader2, MessageCircleQuestion,
   ChevronLeft, ChevronRight, Send, ScanLine, Camera,
-  Pencil, Trash2, Keyboard
+  Pencil, Trash2, Keyboard, Plus, Minus
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
@@ -58,6 +58,15 @@ const EXTRA_CSS = `
 }
 .vt-edit-collapse.is-open > .vt-edit-collapse-inner {
   opacity: 1;
+}
+/* Scroll interno Obiettivi senza barra visibile (evita flash in apertura). */
+.vt-targets-scroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.vt-targets-scroll::-webkit-scrollbar {
+  display: none;
 }`;
 
 // ---------------------------------------------------------------------------
@@ -251,15 +260,20 @@ function pctFromGrams(t) {
   return normalize100({ p: (kP / sum) * 100, c: (kC / sum) * 100, g: (kG / sum) * 100 });
 }
 
-// Grammi derivati da split % + kcal target: i grammi riempiono esattamente le
-// calorie (perché le % sommano a 100).
-function gramsFromPct(kcal, pct) {
+const MACRO_KEYS = { p: 'proteine', c: 'carboidrati', g: 'grassi' };
+const MACRO_FACTOR = { p: 4, c: 4, g: 9 };
+
+// % di un macro rispetto alle kcal target (non normalizzata sugli altri).
+function pctFromGramsVsKcal(grams, factor, kcal) {
   const k = toNum(kcal);
-  return {
-    proteine: Math.round(((pct.p / 100) * k) / 4),
-    carboidrati: Math.round(((pct.c / 100) * k) / 4),
-    grassi: Math.round(((pct.g / 100) * k) / 9),
-  };
+  if (k <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((toNum(grams) * factor / k) * 100)));
+}
+
+function gramsFromPctOne(pct, factor, kcal) {
+  const k = toNum(kcal);
+  const p = Math.max(0, Math.min(100, Math.round(toNum(pct))));
+  return Math.max(0, Math.round(((p / 100) * k) / factor));
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +301,8 @@ export default function VoiceTrackDashboard() {
   const [savingTargets, setSavingTargets] = useState(false);
   const [targetMsg, setTargetMsg] = useState('');
   const [lastSync, setLastSync] = useState(null);
-  // Ripartizione macro (%) mentre l'editor Obiettivi è aperto: somma sempre 100.
-  // Inizializzata dai grammi salvati all'apertura del pannello; i grammi da
-  // salvare sono derivati da questo split + kcal (§7.2).
+  // Ripartizione macro (%) mentre l'editor Obiettivi è aperto (indipendenti).
+  // Inizializzata dai grammi all'apertura; i grammi precisi restano in targetDraft.
   const [macroPct, setMacroPct] = useState(() => pctFromGrams(DEMO_TARGET));
 
   // --- Tab attivo: 'diario' (dashboard) | 'traccia' (voce) ---
@@ -363,6 +376,8 @@ export default function VoiceTrackDashboard() {
   }, [targetsOpen]);
 
   // Pannello Obiettivi: montato durante exit così altezza/opacità possono chiudersi.
+  // Hero a slot fissi (data | medio | gauge): il readout resta nello slot medio e
+  // riappare solo dopo lo smontaggio (niente spacer flex-grow / drift verticale).
   useEffect(() => {
     if (targetsCloseTimerRef.current) {
       clearTimeout(targetsCloseTimerRef.current);
@@ -389,6 +404,22 @@ export default function VoiceTrackDashboard() {
       }
     };
   }, [targetsOpen]);
+
+  // Evita il flash della scrollbar di pagina mentre Obiettivi apre/è aperto,
+  // senza maxHeight sulla fold (che costringeva a scorrere dentro la scheda).
+  useEffect(() => {
+    if (!targetsMounted) return undefined;
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.overflow;
+    const prevBody = body.style.overflow;
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      html.style.overflow = prevHtml;
+      body.style.overflow = prevBody;
+    };
+  }, [targetsMounted]);
 
   // Load saved endpoint config on mount.
   useEffect(() => {
@@ -504,14 +535,19 @@ export default function VoiceTrackDashboard() {
   };
 
   const saveTargets = async () => {
-    // Gli slider sono indipendenti: si salva solo con una ripartizione al 100%,
-    // così i grammi derivati da split % + kcal riempiono esattamente le calorie.
+    // Macro indipendenti: si salva solo con ripartizione al 100%. I grammi
+    // restano quelli in bozza (digitati / ±1), non ricalcolati dallo split %.
     if (macroPct.p + macroPct.c + macroPct.g !== 100) {
       setTargetMsg('Serve una ripartizione al 100% per salvare');
       return;
     }
     const kcal = Number(targetDraft.kcal) || DEMO_TARGET.kcal;
-    const clean = { kcal, ...gramsFromPct(kcal, macroPct) };
+    const clean = {
+      kcal,
+      proteine: Math.round(toNum(targetDraft.proteine)),
+      carboidrati: Math.round(toNum(targetDraft.carboidrati)),
+      grassi: Math.round(toNum(targetDraft.grassi)),
+    };
     // Live: salva sul backend nella tab Config
     if (config.apiUrl) {
       setSavingTargets(true);
@@ -541,6 +577,7 @@ export default function VoiceTrackDashboard() {
     } else {
       // Demo: solo stato locale
       setTarget(clean);
+      setTargetDraft(clean);
       setTargetMsg('Salvato (demo — non persistito)');
       setTargetsOpen(false);
     }
@@ -1108,12 +1145,42 @@ export default function VoiceTrackDashboard() {
   };
 
   // --- Obiettivi: split macro in % (Deploy 5 §7.2) -------------------------
-  // Le percentuali (macroPct) sono la fonte di verità mentre l'editor è aperto.
-  // Gli slider sono indipendenti: muoverne uno non tocca gli altri due; il
-  // totale può quindi differire da 100 e va portato a 100 per salvare.
-  const onTargetKcalChange = (v) => setTargetDraft((d) => ({ ...d, kcal: v }));
-  const setMacroSlider = (which, v) =>
-    setMacroPct((prev) => ({ ...prev, [which]: Math.max(0, Math.min(100, Math.round(v))) }));
+  // Grammi in targetDraft = quantità precisa (digitazione / ±1 g).
+  // macroPct + slider aggiornano i grammi di quel solo macro; gli altri restano.
+  // Totale può ≠100 → va portato a 100 per salvare.
+  // Digitando le calorie: le barre si riscalano in proporzione fino a 100%
+  // (le proporzioni attuali restano, la somma torna 100) e i grammi si derivano.
+  const onTargetKcalChange = (v) => {
+    const s = macroPct.p + macroPct.c + macroPct.g;
+    const next = s > 0
+      ? normalize100({ p: (macroPct.p / s) * 100, c: (macroPct.c / s) * 100, g: (macroPct.g / s) * 100 })
+      : macroPct;
+    setMacroPct(next);
+    setTargetDraft((d) => ({
+      ...d,
+      kcal: v,
+      proteine: gramsFromPctOne(next.p, 4, v),
+      carboidrati: gramsFromPctOne(next.c, 4, v),
+      grassi: gramsFromPctOne(next.g, 9, v),
+    }));
+  };
+  const setMacroSlider = (which, v) => {
+    const pct = Math.max(0, Math.min(100, Math.round(toNum(v))));
+    const key = MACRO_KEYS[which];
+    const factor = MACRO_FACTOR[which];
+    setMacroPct((prev) => ({ ...prev, [which]: pct }));
+    setTargetDraft((d) => ({ ...d, [key]: gramsFromPctOne(pct, factor, d.kcal) }));
+  };
+  const setMacroGrams = (which, v) => {
+    const key = MACRO_KEYS[which];
+    const factor = MACRO_FACTOR[which];
+    const nextVal = typeof v === 'number' ? Math.max(0, Math.round(v)) : v;
+    setTargetDraft((d) => ({ ...d, [key]: nextVal }));
+    setMacroPct((prev) => ({
+      ...prev,
+      [which]: pctFromGramsVsKcal(toNum(nextVal), factor, targetDraft.kcal),
+    }));
+  };
 
   const saveEdit = useCallback(async (meal) => {
     if (!editDraft || editBusy) return;
@@ -1328,11 +1395,8 @@ export default function VoiceTrackDashboard() {
     { name: 'Grassi', grams: totals.grassi, cal: totals.grassi * 9, color: C.fat },
   ];
 
-  // Grammi dell'obiettivo derivati dallo split % + kcal (per l'anteprima
-  // accanto a ogni slider). Le % sommano sempre a 100 → i grammi riempiono
-  // esattamente le calorie target.
-  const draftGrams = gramsFromPct(targetDraft.kcal, macroPct);
-  // Somma delle % degli slider (indipendenti): deve essere 100 per salvare.
+  // Grammi in bozza (fonte precisa per digitazione / ±1); % derivate a parte.
+  // Somma delle % (indipendenti): deve essere 100 per salvare.
   const macroSum = macroPct.p + macroPct.c + macroPct.g;
 
   const statusDot = status === 'live' ? C.good : status === 'error' ? C.alert : C.amber;
@@ -1469,182 +1533,279 @@ export default function VoiceTrackDashboard() {
               }}
               aria-hidden={view !== 'diario'}
             >
-        {/* Hero readout */}
-        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr 28px', alignItems: 'center' }}>
-            <button
-              onClick={() => setDayOffset((o) => o - 1)}
-              disabled={!config.apiUrl}
-              aria-label="Giorno precedente"
-              style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', justifyContent: 'center', width: '28px', flexShrink: 0, opacity: config.apiUrl ? 1 : 0.4 }}
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '12px', color: dayOffset === 0 ? C.inkMuted : C.ink }}>
-                {dayOffset === 0 ? dayLabel() : dayLabel(selectedDate)}
-              </span>
-              {dayOffset === 0 ? (
-                <button onClick={() => fetchLive(config)} style={{ color: C.inkMuted, background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex' }} aria-label="Aggiorna">
-                  <RefreshCw size={13} className={status === 'loading' ? 'animate-spin' : ''} />
-                </button>
-              ) : (
-                <button onClick={() => setDayOffset(0)} style={{ color: C.good, background: 'transparent', border: `1px solid ${C.line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
-                  {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
-                </button>
-              )}
+        {/* Above the fold: calorie + azioni + macro riempiono la prima viewport.
+            Con Obiettivi aperto la card calorie prende tutto lo schermo utile. */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0,
+            minHeight: 'calc(100dvh - 150px)',
+            paddingBottom: '22px',
+            boxSizing: 'border-box',
+            flexShrink: 0,
+          }}
+        >
+        {/* Hero: tre slot fissi — data | medio (readout / Obiettivi) | gauge */}
+        <div
+          style={{
+            background: C.surface,
+            border: `1px solid ${C.line}`,
+            borderRadius: '14px',
+            padding: '22px 22px 34px',
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'flex-start',
+            minHeight: 0,
+            overflowY: targetsMounted ? 'hidden' : undefined,
+            boxSizing: 'border-box',
+          }}
+        >
+          {/* Slot data: nascosto con Obiettivi aperto; torna insieme ad azioni (gate targetsAnimOpen). */}
+          <div
+            style={{
+              flexShrink: 0,
+              maxHeight: (targetsOpen || targetsAnimOpen) ? 0 : 40,
+              opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
+              overflow: 'hidden',
+              pointerEvents: (targetsOpen || targetsAnimOpen) ? 'none' : 'auto',
+              transition: (targetsOpen || targetsAnimOpen)
+                ? 'max-height 0.22s ease, opacity 0.15s ease'
+                : 'max-height 0.28s ease, opacity 0.28s ease-out',
+            }}
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
+              <button
+                onClick={() => setDayOffset((o) => o - 1)}
+                disabled={!config.apiUrl}
+                aria-label="Giorno precedente"
+                style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: config.apiUrl ? 1 : 0.4 }}
+              >
+                <ChevronLeft size={22} />
+              </button>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink }}>
+                  {dayOffset === 0 ? dayLabel() : dayLabel(selectedDate)}
+                </span>
+                {dayOffset !== 0 && (
+                  <button onClick={() => setDayOffset(0)} style={{ color: C.good, background: 'transparent', border: `1px solid ${C.line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
+                    {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
+                  </button>
+                )}
+              </div>
+              <button
+                onClick={() => setDayOffset((o) => Math.min(o + 1, 0))}
+                disabled={dayOffset === 0}
+                aria-label="Giorno successivo"
+                style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: dayOffset === 0 ? 0.3 : 1 }}
+              >
+                <ChevronRight size={22} />
+              </button>
             </div>
-            <button
-              onClick={() => setDayOffset((o) => Math.min(o + 1, 0))}
-              disabled={dayOffset === 0}
-              aria-label="Giorno successivo"
-              style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', justifyContent: 'center', width: '28px', flexShrink: 0, opacity: dayOffset === 0 ? 0.3 : 1 }}
-            >
-              <ChevronRight size={18} />
-            </button>
-          </div>
-          <div className="flex items-end justify-between gap-2 mt-2">
-            <div className="flex items-end gap-2 min-w-0">
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
-                {Math.round(totals.kcal)}
-              </span>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
-                / {target.kcal} kcal
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => { setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
-              style={{
-                color: C.inkMuted,
-                background: C.surfaceRaised,
-                border: `1px solid ${C.line}`,
-                borderRadius: '8px',
-                padding: '6px 10px',
-                fontSize: '11px',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                flexShrink: 0,
-                marginBottom: '4px',
-              }}
-            >
-              <SlidersHorizontal size={12} /> Obiettivi
-            </button>
-          </div>
-          <div style={{ marginTop: '2px' }}>
-            <span style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
-              {overTarget ? `Superato di ${Math.round(-remaining)} kcal` : `Restano ${Math.round(remaining)} kcal`}
-            </span>
           </div>
 
-          {/* Targets editor — apertura/chiusura animata (grid 0fr→1fr) */}
-          {targetsMounted && (
+          {/* Slot medio: readout centrato; editor absolute a tutta altezza dello slot */}
+          <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
             <div
-              className={`vt-edit-collapse${targetsAnimOpen ? ' is-open' : ''}`}
-              onTransitionEnd={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.propertyName !== 'grid-template-rows') return;
-                if (!targetsAnimOpen) {
-                  if (targetsCloseTimerRef.current) {
-                    clearTimeout(targetsCloseTimerRef.current);
-                    targetsCloseTimerRef.current = null;
-                  }
-                  setTargetsMounted(false);
-                }
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+                minHeight: 0,
+                // Nascondi subito in apertura (targetsOpen); al ritorno stesso istante delle azioni.
+                opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
+                pointerEvents: (targetsOpen || targetsAnimOpen) ? 'none' : 'auto',
+                transition: (targetsOpen || targetsAnimOpen)
+                  ? 'opacity 0.15s ease'
+                  : 'opacity 0.28s ease-out',
               }}
             >
-              <div className="vt-edit-collapse-inner" style={{ pointerEvents: targetsOpen && targetsAnimOpen ? 'auto' : 'none' }}>
-                <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', marginTop: '12px' }} className="flex flex-col gap-2">
-                  <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>
-                    OBIETTIVI GIORNALIERI
+              <div className="flex items-end justify-between gap-2">
+                <div className="flex items-end gap-2 min-w-0">
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
+                    {Math.round(totals.kcal)}
                   </span>
-                  <span style={{ fontSize: '10px', color: C.inkFaint }}>
-                    Trascina gli slider in modo indipendente: per salvare la ripartizione deve totalizzare 100%. I grammi si ricavano dalle calorie.
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
+                    / {target.kcal} kcal
                   </span>
-                  <TargetInput label="Calorie" unit="kcal" value={targetDraft.kcal} onChange={onTargetKcalChange} color={C.ink} />
-                  <MacroSlider label="Proteine" pct={macroPct.p} grams={draftGrams.proteine} onChange={(v) => setMacroSlider('p', v)} color={C.protein} />
-                  <MacroSlider label="Carboidrati" pct={macroPct.c} grams={draftGrams.carboidrati} onChange={(v) => setMacroSlider('c', v)} color={C.carbs} />
-                  <MacroSlider label="Grassi" pct={macroPct.g} grams={draftGrams.grassi} onChange={(v) => setMacroSlider('g', v)} color={C.fat} />
-                  <div style={{ fontSize: '11px', color: macroSum === 100 ? C.inkFaint : C.alert, fontFamily: "'IBM Plex Mono', monospace", marginTop: '2px' }}>
-                    Ripartizione: {macroPct.p}% P · {macroPct.c}% C · {macroPct.g}% G = {macroSum}%
-                  </div>
-                  {targetMsg && (
-                    <div style={{ fontSize: '11px', color: /^(Serve|Errore)/.test(targetMsg) ? C.alert : C.good }}>
-                      {targetMsg}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
+                  style={{
+                    color: C.inkMuted,
+                    background: C.surfaceRaised,
+                    border: `1px solid ${C.line}`,
+                    borderRadius: '8px',
+                    padding: '6px 10px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    flexShrink: 0,
+                    marginBottom: '4px',
+                  }}
+                >
+                  <SlidersHorizontal size={12} /> Obiettivi
+                </button>
+              </div>
+              <div style={{ marginTop: '4px' }}>
+                <span style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
+                  {overTarget ? `Superato di ${Math.round(-remaining)} kcal` : `Restano ${Math.round(remaining)} kcal`}
+                </span>
+              </div>
+              {targetMsg && !targetsOpen && (
+                <div style={{ fontSize: '11px', color: targetMsg.startsWith('Errore') ? C.alert : C.good, marginTop: '8px' }}>
+                  {targetMsg}
+                </div>
+              )}
+            </div>
+
+            {targetsMounted && (
+              <div
+                className={`vt-edit-collapse${targetsAnimOpen ? ' is-open' : ''}`}
+                style={{ position: 'absolute', inset: 0, minHeight: 0, display: 'grid' }}
+                onTransitionEnd={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.propertyName !== 'grid-template-rows') return;
+                  if (!targetsAnimOpen) {
+                    if (targetsCloseTimerRef.current) {
+                      clearTimeout(targetsCloseTimerRef.current);
+                      targetsCloseTimerRef.current = null;
+                    }
+                    setTargetsMounted(false);
+                  }
+                }}
+              >
+                <div
+                  className="vt-edit-collapse-inner"
+                  style={{
+                    pointerEvents: targetsOpen && targetsAnimOpen ? 'auto' : 'none',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    height: targetsAnimOpen ? '100%' : undefined,
+                  }}
+                >
+                  <div
+                    style={{
+                      background: C.surfaceRaised,
+                      border: `1px solid ${C.line}`,
+                      borderRadius: '10px',
+                      padding: '16px',
+                      marginTop: '16px',
+                      flex: 1,
+                      minHeight: 0,
+                      justifyContent: 'space-between',
+                      boxSizing: 'border-box',
+                    }}
+                    className="flex flex-col gap-3"
+                  >
+                    <div className="vt-targets-scroll flex flex-col gap-3" style={{ flex: 1, minHeight: 0 }}>
+                      <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>
+                        OBIETTIVI GIORNALIERI
+                      </span>
+                      <KcalSlider value={targetDraft.kcal} onChange={onTargetKcalChange} color={C.ink} />
+                      <div className="flex flex-col gap-6" style={{ marginTop: '10px' }}>
+                        <MacroSlider label="Proteine" pct={macroPct.p} grams={targetDraft.proteine} onPctChange={(v) => setMacroSlider('p', v)} onGramsChange={(v) => setMacroGrams('p', v)} color={C.protein} />
+                        <MacroSlider label="Carboidrati" pct={macroPct.c} grams={targetDraft.carboidrati} onPctChange={(v) => setMacroSlider('c', v)} onGramsChange={(v) => setMacroGrams('c', v)} color={C.carbs} />
+                        <MacroSlider label="Grassi" pct={macroPct.g} grams={targetDraft.grassi} onPctChange={(v) => setMacroSlider('g', v)} onGramsChange={(v) => setMacroGrams('g', v)} color={C.fat} />
+                      </div>
+                      <div style={{ fontSize: '11px', color: macroSum === 100 ? C.inkFaint : C.alert, fontFamily: "'IBM Plex Mono', monospace", marginTop: '2px' }}>
+                        Ripartizione: {macroPct.p}% P · {macroPct.c}% C · {macroPct.g}% G = {macroSum}%
+                      </div>
+                      {targetMsg && (
+                        <div style={{ fontSize: '11px', color: /^(Serve|Errore)/.test(targetMsg) ? C.alert : C.good }}>
+                          {targetMsg}
+                        </div>
+                      )}
                     </div>
-                  )}
-                  <div className="flex items-center gap-2 mt-1">
-                    <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
-                      <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
-                    </button>
-                    <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer' }}>
-                      Annulla
-                    </button>
+                    <div className="flex items-center gap-2 mt-2" style={{ flexShrink: 0 }}>
+                      <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '9px 14px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
+                        <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
+                      </button>
+                      <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '9px 14px', fontSize: '13px', cursor: 'pointer' }}>
+                        Annulla
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-          {targetMsg && !targetsOpen && (
-            <div style={{ fontSize: '11px', color: targetMsg.startsWith('Errore') ? C.alert : C.good, marginTop: '8px' }}>
-              {targetMsg}
-            </div>
-          )}
-
-          {/* Gauge */}
-          <div style={{ marginTop: '14px', height: '8px', borderRadius: '999px', background: C.line, position: 'relative', overflow: 'hidden' }}>
-            <div style={{
-              width: `${Math.min(pct, 1) * 100}%`, height: '100%',
-              background: overTarget ? C.alert : C.good, borderRadius: '999px',
-            }} />
-            {overTarget && (
-              <div style={{ position: 'absolute', left: '100%', top: 0, height: '100%', width: `${Math.min(pct - 1, 0.25) * 100}%`, background: C.alert, opacity: 0.5 }} />
             )}
           </div>
-        </div>
 
-        {/* Plate / macro breakdown */}
-        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <span style={{ fontSize: '12px', color: C.inkMuted }}>Macronutrienti</span>
-          <div className="flex items-center gap-4 mt-2">
-            <div style={{ width: '110px', height: '110px', position: 'relative', flexShrink: 0 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={macroCalData} dataKey="cal" innerRadius={34} outerRadius={52} startAngle={90} endAngle={-270} stroke="none">
-                    {macroCalData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <UtensilsCrossed size={18} color={C.inkFaint} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', flex: 1 }}>
-              <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={target.proteine} color={C.protein} />
-              <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={target.carboidrati} color={C.carbs} />
-              <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={target.grassi} color={C.fat} />
+          {/* Slot gauge: nascosto con Obiettivi aperto; torna insieme ad azioni (gate targetsAnimOpen). */}
+          <div
+            style={{
+              flexShrink: 0,
+              height: (targetsOpen || targetsAnimOpen) ? 0 : 8,
+              marginTop: (targetsOpen || targetsAnimOpen) ? 0 : 14,
+              opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
+              overflow: 'hidden',
+              transition: (targetsOpen || targetsAnimOpen)
+                ? 'height 0.22s ease, margin-top 0.22s ease, opacity 0.15s ease'
+                : 'height 0.28s ease, margin-top 0.28s ease, opacity 0.28s ease-out',
+            }}
+          >
+            <div style={{ height: '8px', borderRadius: '999px', background: C.line, position: 'relative', overflow: 'hidden' }}>
+              <div style={{
+                width: `${Math.min(pct, 1) * 100}%`, height: '100%',
+                background: overTarget ? C.alert : C.good, borderRadius: '999px',
+              }} />
+              {overTarget && (
+                <div style={{ position: 'absolute', left: '100%', top: 0, height: '100%', width: `${Math.min(pct - 1, 0.25) * 100}%`, background: C.alert, opacity: 0.5 }} />
+              )}
             </div>
           </div>
         </div>
 
+        {/* Azioni + macro: collassano (flex-grow → 0) mentre Obiettivi si apre, con easing */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '22px',
+            flexGrow: targetsAnimOpen ? 0 : (dayOffset === 0 ? 2 : 1),
+            flexBasis: 0,
+            minHeight: 0,
+            marginTop: targetsAnimOpen ? 0 : '22px',
+            overflow: 'hidden',
+            opacity: targetsAnimOpen ? 0 : 1,
+            pointerEvents: targetsAnimOpen ? 'none' : 'auto',
+            transition: 'flex-grow 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), margin-top 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.22s ease',
+          }}
+          aria-hidden={targetsAnimOpen}
+        >
         {/* Azioni rapide: testo / barcode / voce → tab Traccia o Scan */}
         {dayOffset === 0 && (
-          <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '16px 20px' }}>
+          <div
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.line}`,
+              borderRadius: '14px',
+              padding: '18px 22px',
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              minHeight: 0,
+            }}
+          >
             <div className="flex items-center" style={{ justifyContent: 'space-around' }}>
               {[
-                { id: 'text', label: 'TESTO', aria: 'Scrivi un pasto', icon: <Keyboard size={22} />, action: 'text' },
-                { id: 'scan', label: 'SCAN', aria: 'Scansiona un barcode', icon: <ScanLine size={22} />, action: 'scan' },
-                { id: 'voice', label: 'VOCE', aria: 'Registra a voce', icon: <Mic size={22} />, action: 'voice' },
+                { id: 'text', label: 'TESTO', aria: 'Scrivi un pasto', icon: <Keyboard size={24} />, action: 'text' },
+                { id: 'scan', label: 'SCAN', aria: 'Scansiona un barcode', icon: <ScanLine size={24} />, action: 'scan' },
+                { id: 'voice', label: 'VOCE', aria: 'Registra a voce', icon: <Mic size={24} />, action: 'voice' },
               ].map((btn) => (
-                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '8px' }}>
+                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '10px' }}>
                   <button
                     type="button"
                     onClick={() => launchQuickAction(btn.action)}
                     aria-label={btn.aria}
                     style={{
-                      width: '60px', height: '60px', borderRadius: '999px',
+                      width: '66px', height: '66px', borderRadius: '999px',
                       border: `1px solid ${C.line}`,
                       background: C.surfaceRaised,
                       color: C.ink,
@@ -1662,6 +1823,44 @@ export default function VoiceTrackDashboard() {
             </div>
           </div>
         )}
+
+        {/* Plate / macro breakdown */}
+        <div
+          style={{
+            background: C.surface,
+            border: `1px solid ${C.line}`,
+            borderRadius: '14px',
+            padding: '22px',
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            minHeight: 0,
+          }}
+        >
+          <span style={{ fontSize: '12px', color: C.inkMuted }}>Macronutrienti</span>
+          <div className="flex items-center gap-4 mt-3">
+            <div style={{ width: '110px', height: '110px', position: 'relative', flexShrink: 0 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={macroCalData} dataKey="cal" innerRadius={34} outerRadius={52} startAngle={90} endAngle={-270} stroke="none">
+                    {macroCalData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <UtensilsCrossed size={18} color={C.inkFaint} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', flex: 1 }}>
+              <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={target.proteine} color={C.protein} />
+              <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={target.carboidrati} color={C.carbs} />
+              <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={target.grassi} color={C.fat} />
+            </div>
+          </div>
+        </div>
+        </div>
+        </div>
 
         {/* Meal log */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
@@ -2435,35 +2634,167 @@ function TargetInput({ label, unit, value, onChange, color }) {
   );
 }
 
+const KCAL_MIN = 1000;
+const KCAL_MAX = 4000;
+const KCAL_STEP = 10;
+
 // ---------------------------------------------------------------------------
-// Slider di ripartizione per un macro (Deploy 5 §7.2): riga con etichetta,
-// % corrente e grammi derivati (da split + kcal), poi la barra regolabile.
-// `accentColor` colora traccia e pallino nel colore del macro (funziona con il
-// touch su Chrome/Android, il target di test del progetto).
+// Slider calorie Obiettivi: stesso layout dei macro (− | range | +),
+// input digitabile in alto. Valori fuori 1000–4000 restano digitabili;
+// slider e ± restano clampati al range.
 // ---------------------------------------------------------------------------
-function MacroSlider({ label, pct, grams, onChange, color }) {
+function KcalSlider({ value, onChange, color }) {
+  const n = Math.round(toNum(value));
+  const clamped = Math.max(KCAL_MIN, Math.min(KCAL_MAX, n));
+  const inputStyle = {
+    textAlign: 'right',
+    background: '#121613',
+    border: '1px solid #2B352F',
+    color: '#EFEDE4',
+    borderRadius: '6px',
+    padding: '6px 8px',
+    fontSize: '13px',
+    fontFamily: "'IBM Plex Mono', monospace",
+  };
+  const stepBtn = {
+    width: '32px',
+    height: '32px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: C.surfaceRaised,
+    border: `1px solid ${C.line}`,
+    borderRadius: '6px',
+    color: C.inkMuted,
+    cursor: 'pointer',
+    padding: 0,
+    flexShrink: 0,
+  };
+  const bump = (delta) => {
+    const base = Number.isFinite(n) ? n : KCAL_MIN;
+    onChange(Math.max(KCAL_MIN, Math.min(KCAL_MAX, base + delta)));
+  };
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div style={{ width: 6, height: 6, borderRadius: 999, background: color }} />
-          <span style={{ fontSize: '13px' }}>{label}</span>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div style={{ width: 6, height: 6, borderRadius: 999, background: color, flexShrink: 0 }} />
+          <span style={{ fontSize: '13px' }}>Calorie</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color, minWidth: '38px', textAlign: 'right' }}>{pct}%</span>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkFaint, width: '52px', textAlign: 'right' }}>{Math.round(grams)} g</span>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            aria-label="Calorie giornaliere"
+            style={{ ...inputStyle, width: '72px', color }}
+          />
+          <span style={{ fontSize: '11px', color: '#5B655E', width: '28px' }}>kcal</span>
         </div>
       </div>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        step="1"
-        value={pct}
-        onChange={(e) => onChange(Number(e.target.value))}
-        aria-label={`Percentuale ${label}`}
-        style={{ width: '100%', accentColor: color, cursor: 'pointer' }}
-      />
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => bump(-KCAL_STEP)} aria-label="Calorie meno dieci" style={stepBtn}>
+          <Minus size={14} />
+        </button>
+        <input
+          type="range"
+          min={KCAL_MIN}
+          max={KCAL_MAX}
+          step={KCAL_STEP}
+          value={clamped}
+          onChange={(e) => onChange(Number(e.target.value))}
+          aria-label="Slider calorie"
+          style={{ flex: 1, minWidth: 0, accentColor: color, cursor: 'pointer' }}
+        />
+        <button type="button" onClick={() => bump(KCAL_STEP)} aria-label="Calorie più dieci" style={stepBtn}>
+          <Plus size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slider di ripartizione per un macro (Deploy 5 §7.2): etichetta, % e grammi
+// digitabili, ±1 g, poi la barra. `accentColor` colora traccia e pallino
+// (touch su Chrome/Android, target di test del progetto).
+// ---------------------------------------------------------------------------
+function MacroSlider({ label, pct, grams, onPctChange, onGramsChange, color }) {
+  const inputStyle = {
+    textAlign: 'right',
+    background: '#121613',
+    border: '1px solid #2B352F',
+    color: '#EFEDE4',
+    borderRadius: '6px',
+    padding: '6px 8px',
+    fontSize: '13px',
+    fontFamily: "'IBM Plex Mono', monospace",
+  };
+  const stepBtn = {
+    width: '32px',
+    height: '32px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: C.surfaceRaised,
+    border: `1px solid ${C.line}`,
+    borderRadius: '6px',
+    color: C.inkMuted,
+    cursor: 'pointer',
+    padding: 0,
+    flexShrink: 0,
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div style={{ width: 6, height: 6, borderRadius: 999, background: color, flexShrink: 0 }} />
+          <span style={{ fontSize: '13px' }}>{label}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            max="100"
+            value={pct}
+            onChange={(e) => onPctChange(e.target.value)}
+            aria-label={`Percentuale ${label}`}
+            style={{ ...inputStyle, width: '48px', color }}
+          />
+          <span style={{ fontSize: '11px', color: '#5B655E', width: '14px' }}>%</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={grams}
+            onChange={(e) => onGramsChange(e.target.value)}
+            aria-label={`Grammi ${label}`}
+            style={{ ...inputStyle, width: '56px' }}
+          />
+          <span style={{ fontSize: '11px', color: '#5B655E', width: '14px' }}>g</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => onGramsChange(Math.max(0, Math.round(toNum(grams)) - 1))} aria-label={`${label} meno un grammo`} style={stepBtn}>
+          <Minus size={14} />
+        </button>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          value={pct}
+          onChange={(e) => onPctChange(Number(e.target.value))}
+          aria-label={`Slider ${label}`}
+          style={{ flex: 1, minWidth: 0, accentColor: color, cursor: 'pointer' }}
+        />
+        <button type="button" onClick={() => onGramsChange(Math.round(toNum(grams)) + 1)} aria-label={`${label} più un grammo`} style={stepBtn}>
+          <Plus size={14} />
+        </button>
+      </div>
     </div>
   );
 }
