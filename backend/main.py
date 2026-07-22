@@ -320,18 +320,27 @@ def _off_per_100g(product):
         except (TypeError, ValueError):
             return None
 
-    kcal = num("energy-kcal_100g")
+    def per100(base_key):
+        # Alcuni prodotti (es. bevande/yogurt da preparare) hanno valori OFF
+        # solo sotto le chiavi "_prepared_100g": senza questo fallback la
+        # scheda risulta "senza valori nutrizionali" anche se i dati esistono.
+        val = num(f"{base_key}_100g")
+        if val is None:
+            val = num(f"{base_key}_prepared_100g")
+        return val
+
+    kcal = per100("energy-kcal")
     if kcal is None:
-        kj = num("energy_100g")  # OFF: spesso solo kJ
+        kj = per100("energy")  # OFF: spesso solo kJ
         kcal = round(kj / 4.184, 1) if kj is not None else None
     if kcal is None:
         return None
 
     return {
         "kcal": round(kcal, 1),
-        "proteine": round(num("proteins_100g") or 0.0, 1),
-        "carboidrati": round(num("carbohydrates_100g") or 0.0, 1),
-        "grassi": round(num("fat_100g") or 0.0, 1),
+        "proteine": round(per100("proteins") or 0.0, 1),
+        "carboidrati": round(per100("carbohydrates") or 0.0, 1),
+        "grassi": round(per100("fat") or 0.0, 1),
     }
 
 
