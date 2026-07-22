@@ -68,6 +68,40 @@ const EXTRA_CSS = `
 }
 .vt-targets-scroll::-webkit-scrollbar {
   display: none;
+}
+.vt-delete-confirm-fill {
+  transform-origin: right center;
+  transform: scaleX(0);
+  transition: transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.vt-delete-confirm-fill.is-open {
+  transform: scaleX(1);
+}
+.vt-delete-confirm-content {
+  opacity: 0;
+  transform: translateX(12px);
+  transition: opacity 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.vt-delete-confirm-content.is-open {
+  opacity: 1;
+  transform: translateX(0);
+}
+.vt-edit-confirm-fill {
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.vt-edit-confirm-fill.is-open {
+  transform: scaleX(1);
+}
+.vt-edit-confirm-content {
+  opacity: 0;
+  transform: translateX(-12px);
+  transition: opacity 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.vt-edit-confirm-content.is-open {
+  opacity: 1;
+  transform: translateX(0);
 }`;
 
 // ---------------------------------------------------------------------------
@@ -200,6 +234,110 @@ const TREND_TITLE = {
 const PASTO_ORDER = ['colazione', 'pranzo', 'spuntino', 'cena'];
 const PASTO_LABEL = { colazione: 'Colazione', pranzo: 'Pranzo', spuntino: 'Spuntino', cena: 'Cena' };
 const TAB_ORDER = ['diario', 'traccia', 'scan'];
+// Zoom digitale di rinforzo sullo scan barcode (preview CSS + crop del detector).
+// Il fix principale e' lo zoom hardware / deviceId (§7.2): questo resta un aiuto
+// leggero dopo che la lente e' quella giusta, non un sostituto del fuoco ottico.
+const SCAN_DIGITAL_ZOOM = 1.35;
+const SCAN_CAMERA_ID_KEY = 'vt-scan-camera-id';
+const SCAN_TARGET_ZOOM = 2; // tipicamente fa uscire dalla 0.5x sulla lente principale
+
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Preferisce la back camera "normale", evita ultra-wide / front se le label ci sono. */
+function pickScanCameraId(devices, currentId) {
+  const videos = devices.filter((d) => d.kind === 'videoinput');
+  if (videos.length === 0) return currentId || null;
+
+  const labelOf = (d) => String(d.label || '').toLowerCase();
+  const isFront = (d) => /front|user|selfie|faccia/.test(labelOf(d));
+  const isUltra = (d) => /ultra|uw\b|0\s*\.?\s*5|grandangol|wide-angle|wide angle/.test(labelOf(d));
+  const isBackish = (d) => /back|rear|environment|facing back|camera2\s*0|world/.test(labelOf(d));
+
+  const back = videos.filter((d) => !isFront(d));
+  const pool = back.length ? back : videos;
+  const notUltra = pool.filter((d) => !isUltra(d));
+  const candidates = notUltra.length ? notUltra : pool;
+
+  const preferred =
+    candidates.find(isBackish) ||
+    candidates.find((d) => d.deviceId === currentId) ||
+    candidates[0];
+  return preferred?.deviceId || currentId || null;
+}
+
+async function openScanCameraStream() {
+  const videoBase = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+  const savedId = localStorage.getItem(SCAN_CAMERA_ID_KEY);
+
+  let stream = null;
+  if (savedId) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { ...videoBase, deviceId: { exact: savedId } },
+        audio: false,
+      });
+    } catch (e) {
+      // deviceId stale (cambio telefono / permesso): ricadi su facingMode
+      try { localStorage.removeItem(SCAN_CAMERA_ID_KEY); } catch (err) {}
+    }
+  }
+  if (!stream) {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { ...videoBase, facingMode: { ideal: 'environment' } },
+      audio: false,
+    });
+  }
+
+  // Dopo il permesso le label sono popolate: se siamo sull'ultra-wide, riprova con
+  // una back camera migliore e ricorda il deviceId per i prossimi scan.
+  try {
+    const track = stream.getVideoTracks()[0];
+    const currentId = track?.getSettings?.()?.deviceId || '';
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const betterId = pickScanCameraId(devices, currentId);
+    if (betterId && betterId !== currentId) {
+      const next = await navigator.mediaDevices.getUserMedia({
+        video: { ...videoBase, deviceId: { exact: betterId } },
+        audio: false,
+      });
+      try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      stream = next;
+    }
+    const finalId = stream.getVideoTracks()[0]?.getSettings?.()?.deviceId;
+    if (finalId) localStorage.setItem(SCAN_CAMERA_ID_KEY, finalId);
+  } catch (e) { /* enumerate/switch best-effort */ }
+
+  return stream;
+}
+
+/** Zoom fisico ~2x + AF/esposizione continui: su molti Android porta fuori dalla 0.5x. */
+async function applyScanTrackConstraints(track) {
+  if (!track?.getCapabilities) return;
+  const caps = track.getCapabilities() ?? {};
+  const advanced = {};
+  if (caps.zoom) {
+    const zMin = caps.zoom.min ?? 1;
+    const zMax = caps.zoom.max ?? 1;
+    if (zMax > zMin) {
+      // Mira a SCAN_TARGET_ZOOM; se il range e' stretto resta il massimo utile.
+      advanced.zoom = clamp(SCAN_TARGET_ZOOM, zMin, zMax);
+    }
+  }
+  if (caps.focusMode?.includes('continuous')) advanced.focusMode = 'continuous';
+  if (caps.exposureMode?.includes('continuous')) advanced.exposureMode = 'continuous';
+  if (caps.whiteBalanceMode?.includes('continuous')) advanced.whiteBalanceMode = 'continuous';
+  if (Object.keys(advanced).length === 0) return;
+  try {
+    await track.applyConstraints({ advanced: [advanced] });
+  } catch (e) {
+    // Alcuni browser accettano zoom solo come constraint di primo livello.
+    if (advanced.zoom != null) {
+      try { await track.applyConstraints({ zoom: advanced.zoom }); } catch (err) {}
+    }
+  }
+}
 
 function groupByPasto(meals) {
   const groups = {};
@@ -448,10 +586,11 @@ export default function VoiceTrackDashboard() {
   const [editDraft, setEditDraft] = useState(null);        // { alimento, grammi, kcal, proteine, carboidrati, grassi }
   const [editBusy, setEditBusy] = useState(false);
   const [editError, setEditError] = useState('');
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id in attesa di conferma
-  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id in attesa di conferma elimina
+  const [confirmEditId, setConfirmEditId] = useState(null);     // id in attesa di conferma modifica (swipe)
   const [swipeId, setSwipeId] = useState(null);            // riga trascinata
   const [swipeX, setSwipeX] = useState(0);                 // offset corrente (px, ±SWIPE_MAX)
+  const suppressRowClickRef = useRef(false);                // evita che il click sintetico post-touch riapra il pannello appena chiuso
 
   const POLL_MS = 20000; // refresh dati ogni 20s mentre l'app e' aperta e visibile
 
@@ -1519,11 +1658,14 @@ export default function VoiceTrackDashboard() {
   const [scanError, setScanError] = useState('');
   const [scanNotFound, setScanNotFound] = useState('');
   const [qtyListening, setQtyListening] = useState(false);
+  const [eanListening, setEanListening] = useState(false);
+  const [manualEan, setManualEan] = useState('');
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const detectTimerRef = useRef(null);
   const qtyRecRef = useRef(null);
+  const eanRecRef = useRef(null);
 
   const barcodeSupported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
 
@@ -1540,6 +1682,7 @@ export default function VoiceTrackDashboard() {
     clearLogFlow();
     stopCamera();
     try { qtyRecRef.current?.abort?.(); } catch (e) {}
+    try { eanRecRef.current?.abort?.(); } catch (e) {}
     setScanState('idle');
     setScanProduct(null);
     setScanQty('');
@@ -1547,6 +1690,8 @@ export default function VoiceTrackDashboard() {
     setScanError('');
     setScanNotFound('');
     setQtyListening(false);
+    setEanListening(false);
+    setManualEan('');
   }, [stopCamera, clearLogFlow]);
 
   // Uscendo dal tab Scan (o smontando): camera spenta, stato pulito.
@@ -1626,6 +1771,16 @@ export default function VoiceTrackDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config, speak, beginLogFlow, clearLogFlow, getTargetDateForLog, refreshAfterLog, fetchCatalog]);
 
+  // Inserimento manuale dell'EAN: stessa strada di sendBarcode, utile quando la
+  // fotocamera legge un codice sbagliato (riflessi/etichetta curva) o manca del tutto.
+  const submitManualEan = useCallback(() => {
+    const code = manualEan.trim();
+    if (!code || scanState !== 'idle') return;
+    stopCamera();
+    sendBarcode(code, null);
+    setManualEan('');
+  }, [manualEan, scanState, stopCamera, sendBarcode]);
+
   const startScan = useCallback(async () => {
     if (!barcodeSupported || scanState !== 'idle') return;
     setScanResult(null);
@@ -1633,10 +1788,7 @@ export default function VoiceTrackDashboard() {
     setScanNotFound('');
     setScanProduct(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-        audio: false,
-      });
+      const stream = await openScanCameraStream();
       streamRef.current = stream;
       setScanState('scanning');
       // Il <video> viene montato dal render di 'scanning': aggancio al frame dopo.
@@ -1645,11 +1797,33 @@ export default function VoiceTrackDashboard() {
         videoRef.current.srcObject = streamRef.current;
         try { await videoRef.current.play(); } catch (e) {}
 
+        // Zoom hardware ~2x + AF continuo: esce dalla 0.5x quando il browser lo espone.
+        const track = streamRef.current.getVideoTracks()[0];
+        await applyScanTrackConstraints(track);
+
         const detector = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8'] });
         detectTimerRef.current = setInterval(async () => {
-          if (!videoRef.current || videoRef.current.readyState < 2) return;
+          const video = videoRef.current;
+          if (!video || video.readyState < 2 || !video.videoWidth) return;
           try {
-            const codes = await detector.detect(videoRef.current);
+            // Crop centrale allineato alla linea di mira (rinforzo dopo lo zoom fisico).
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const cropW = vw / SCAN_DIGITAL_ZOOM;
+            const cropH = vh / SCAN_DIGITAL_ZOOM;
+            const sx = (vw - cropW) / 2;
+            const sy = (vh - cropH) / 2;
+            const bitmap = await createImageBitmap(video, sx, sy, cropW, cropH, {
+              resizeWidth: Math.round(cropW * SCAN_DIGITAL_ZOOM),
+              resizeHeight: Math.round(cropH * SCAN_DIGITAL_ZOOM),
+              resizeQuality: 'high',
+            });
+            let codes;
+            try {
+              codes = await detector.detect(bitmap);
+            } finally {
+              bitmap.close();
+            }
             if (codes && codes.length > 0) {
               const code = (codes[0].rawValue || '').trim();
               if (code) {
@@ -1789,6 +1963,27 @@ export default function VoiceTrackDashboard() {
     setQtyListening(true);
     try { rec.start(); } catch (e) { setQtyListening(false); }
   }, [qtyListening, scanState]);
+
+  // Microfono per EAN a mano: one-shot, tiene solo le cifre dette.
+  const listenManualEan = useCallback(() => {
+    if (!SpeechRecognitionAPI || eanListening || scanState !== 'idle') return;
+    try { window.speechSynthesis?.cancel(); } catch (e) {}
+    const rec = new SpeechRecognitionAPI();
+    rec.lang = 'it-IT';
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (event) => {
+      const said = event.results?.[0]?.[0]?.transcript || '';
+      const digits = said.replace(/\D/g, '');
+      if (digits) setManualEan(digits);
+    };
+    rec.onend = () => { eanRecRef.current = null; setEanListening(false); };
+    rec.onerror = () => { eanRecRef.current = null; setEanListening(false); };
+    eanRecRef.current = rec;
+    setEanListening(true);
+    try { rec.start(); } catch (e) { setEanListening(false); }
+  }, [eanListening, scanState]);
 
   const selectedDate = useMemo(() => {
     const d = new Date();
@@ -2019,6 +2214,7 @@ export default function VoiceTrackDashboard() {
     setSwipeId(null);
     setSwipeX(0);
     setConfirmDeleteId(null);
+    setConfirmEditId(null);
     setEditError('');
     setEditingId(m.id);
     setEditDraft({
@@ -2116,9 +2312,31 @@ export default function VoiceTrackDashboard() {
   }, [editDraft, editBusy, config, closeEdit, refreshDay]);
 
   const deleteMeal = useCallback(async (meal) => {
-    if (deleteBusy) return;
-    setDeleteBusy(true);
     setEditError('');
+
+    // Rimozione ottimistica: la riga sparisce subito, senza aspettare la
+    // risposta del backend (prima il pulsante restava a girare fino al round
+    // trip completo, dando l'impressione di un freeze).
+    setConfirmDeleteId(null);
+    setSwipeId(null);
+    setSwipeX(0);
+    if (editingId === meal.id) closeEdit();
+    const rollback = dayOffset === 0
+      ? (() => {
+          const prev = meals;
+          setMeals((cur) => cur.filter((m) => m.id !== meal.id));
+          return () => setMeals(prev);
+        })()
+      : (() => {
+          const prev = dayCache[selectedDateStr];
+          setDayCache((cur) => {
+            const entry = cur[selectedDateStr];
+            if (!entry) return cur;
+            return { ...cur, [selectedDateStr]: { ...entry, meals: (entry.meals || []).filter((m) => m.id !== meal.id) } };
+          });
+          return () => setDayCache((cur) => ({ ...cur, [selectedDateStr]: prev }));
+        })();
+
     try {
       const base = config.apiUrl.replace(/\/$/, '');
       const res = await fetch(`${base}/delete_meal`, {
@@ -2133,28 +2351,31 @@ export default function VoiceTrackDashboard() {
       if (!res.ok || !json || json.status !== 'ok') {
         throw new Error((json && (json.message || json.status)) || `Risposta ${res.status} dal server`);
       }
-      setConfirmDeleteId(null);
-      setSwipeId(null);
-      setSwipeX(0);
-      if (editingId === meal.id) closeEdit();
       refreshDay();
     } catch (e) {
+      rollback();
       setEditError(e.message || 'Impossibile eliminare il pasto');
-    } finally {
-      setDeleteBusy(false);
     }
-  }, [deleteBusy, config, editingId, closeEdit, refreshDay]);
+  }, [config, editingId, closeEdit, refreshDay, dayOffset, meals, dayCache, selectedDateStr]);
 
   // --- Swipe sulla riga: dx→sx elimina, sx→dx modifica (§5.5 del piano) ---
   const SWIPE_MAX = 80;      // apertura massima (px)
   const SWIPE_TRIGGER = 48;  // soglia oltre cui scatta l'azione
+  const TAP_MAX_MOVE = 10;   // sotto questa soglia un tocco è un tap, non uno swipe
   const swipeStartXRef = useRef(0);
 
   const onRowTouchStart = useCallback((m, e) => {
-    if (!isEditable(m) || confirmDeleteId || editingId) return;
+    if (!isEditable(m)) return;
+    suppressRowClickRef.current = false;
     swipeStartXRef.current = e.touches[0].clientX;
+    // Stesso pasto in edit/conferma: niente swipe (tap chiude in touchEnd)
+    if (editingId === m.id || confirmDeleteId === m.id || confirmEditId === m.id) return;
+    // Altro pasto aperto: chiudi e avvia lo swipe su questo
+    if (editingId) closeEdit();
+    if (confirmDeleteId) setConfirmDeleteId(null);
+    if (confirmEditId) setConfirmEditId(null);
     setSwipeId(m.id);
-  }, [isEditable, confirmDeleteId, editingId]);
+  }, [isEditable, confirmDeleteId, confirmEditId, editingId, closeEdit]);
 
   const onRowTouchMove = useCallback((m, e) => {
     if (swipeId !== m.id) return;
@@ -2162,16 +2383,34 @@ export default function VoiceTrackDashboard() {
     setSwipeX(Math.max(-SWIPE_MAX, Math.min(SWIPE_MAX, dx)));
   }, [swipeId]);
 
-  const onRowTouchEnd = useCallback((m) => {
+  const onRowTouchEnd = useCallback((m, e) => {
+    // Pannello di modifica o conferma già aperti: un tap (senza
+    // trascinamento) sulla riga li richiude subito, senza aspettare il click
+    // sintetico del browser (che su alcuni mobile richiederebbe un secondo tocco).
+    if (editingId === m.id || confirmDeleteId === m.id || confirmEditId === m.id) {
+      const endX = e?.changedTouches?.[0]?.clientX ?? swipeStartXRef.current;
+      // Non chiudere se il tocco è su un bottone dell'overlay (matita/cestino/X):
+      // altrimenti l'overlay si smonta prima del click e il tap finisce sulla stellina sotto.
+      if (e?.target?.closest?.('button')) return;
+      if (Math.abs(endX - swipeStartXRef.current) < TAP_MAX_MOVE) {
+        suppressRowClickRef.current = true;
+        if (editingId === m.id) closeEdit();
+        else if (confirmDeleteId === m.id) setConfirmDeleteId(null);
+        else setConfirmEditId(null);
+      }
+      return;
+    }
     if (swipeId !== m.id) return;
     if (swipeX >= SWIPE_TRIGGER) {
-      openEdit(m);
+      setConfirmDeleteId(null);
+      setConfirmEditId(m.id);
     } else if (swipeX <= -SWIPE_TRIGGER) {
+      setConfirmEditId(null);
       setConfirmDeleteId(m.id);
     }
     setSwipeX(0);
     setSwipeId(null);
-  }, [swipeId, swipeX, openEdit]);
+  }, [swipeId, swipeX, editingId, confirmDeleteId, confirmEditId, closeEdit]);
 
   // --- Carosello schede Diario | Traccia | Scan (drag + animazione) ---
   const TAB_SWIPE_MIN = 56;
@@ -2189,8 +2428,8 @@ export default function VoiceTrackDashboard() {
   }, []);
 
   const tabSwipeBlocked = useCallback(
-    () => configOpen || targetsOpen || searchOpen || saveCatalogOpen || !!editingId || !!confirmDeleteId || scanState === 'scanning' || dayDragging || dayPendingCommitRef.current != null,
-    [configOpen, targetsOpen, searchOpen, saveCatalogOpen, editingId, confirmDeleteId, scanState, dayDragging]
+    () => configOpen || targetsOpen || searchOpen || saveCatalogOpen || !!editingId || !!confirmDeleteId || !!confirmEditId || scanState === 'scanning' || dayDragging || dayPendingCommitRef.current != null,
+    [configOpen, targetsOpen, searchOpen, saveCatalogOpen, editingId, confirmDeleteId, confirmEditId, scanState, dayDragging]
   );
 
   const isTabSwipeBlockedTarget = (el) =>
@@ -2851,22 +3090,24 @@ export default function VoiceTrackDashboard() {
                         editable={isEditable(m)}
                         isEditing={editingId === m.id}
                         confirming={confirmDeleteId === m.id}
+                        confirmingEdit={confirmEditId === m.id}
                         active={swipeId === m.id}
                         swipeX={swipeId === m.id ? swipeX : 0}
                         editDraft={editDraft}
                         setEditDraft={setEditDraft}
                         editBusy={editBusy}
                         editError={editError}
-                        deleteBusy={deleteBusy}
                         onOpenEdit={openEdit}
                         onCloseEdit={closeEdit}
                         onSave={saveEdit}
-                        onAskDelete={setConfirmDeleteId}
+                        onAskDelete={(id) => { setConfirmEditId(null); setConfirmDeleteId(id); }}
                         onCancelDelete={() => { setConfirmDeleteId(null); setSwipeId(null); setSwipeX(0); }}
+                        onCancelEditConfirm={() => { setConfirmEditId(null); setSwipeId(null); setSwipeX(0); }}
                         onDelete={deleteMeal}
                         onTouchStart={onRowTouchStart}
                         onTouchMove={onRowTouchMove}
                         onTouchEnd={onRowTouchEnd}
+                        suppressClickRef={suppressRowClickRef}
                         onCatalogStar={config.apiUrl ? onMealCatalogStarClick : undefined}
                         catalogStarFilled={!!catEntry?.preferito}
                         catalogStarBusy={!!catEntry?.id && catalogStarBusyId === catEntry.id}
@@ -3175,7 +3416,7 @@ export default function VoiceTrackDashboard() {
                       ref={videoRef}
                       playsInline
                       muted
-                      style={{ width: '100%', display: 'block', maxHeight: '260px', objectFit: 'cover', background: C.bg }}
+                      style={{ width: '100%', display: 'block', maxHeight: '260px', objectFit: 'cover', background: C.bg, transform: `scale(${SCAN_DIGITAL_ZOOM})`, transformOrigin: 'center center' }}
                     />
                     {/* Linea di mira */}
                     <div style={{ position: 'absolute', left: '10%', right: '10%', top: '50%', height: '2px', background: C.good, opacity: 0.7 }} />
@@ -3221,6 +3462,64 @@ export default function VoiceTrackDashboard() {
                 </>
               )}
             </div>
+
+            {/* Inserimento manuale EAN: alternativa alla fotocamera e correzione
+                per quando lo scan legge un codice sbagliato (§ segnalazione utente). */}
+            {config.apiUrl && scanState !== 'scanning' && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '14px 20px' }} className="flex flex-col gap-2">
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em' }}>
+                  OPPURE INSERISCI L'EAN A MANO
+                </span>
+                <div className="flex items-center w-full" style={{ gap: '8px' }}>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={manualEan}
+                    onChange={(e) => setManualEan(e.target.value.replace(/[^0-9]/g, ''))}
+                    onKeyDown={(e) => { if (e.key === 'Enter') submitManualEan(); }}
+                    disabled={scanState !== 'idle'}
+                    placeholder="es. 8001364110680"
+                    style={{ flex: 1, background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '10px 12px', fontSize: '14px', fontFamily: "'IBM Plex Mono', monospace", opacity: scanState !== 'idle' ? 0.5 : 1 }}
+                  />
+                  <button
+                    onClick={submitManualEan}
+                    disabled={scanState !== 'idle' || manualEan.length < 8}
+                    aria-label="Cerca il codice inserito"
+                    style={{
+                      background: scanState === 'idle' && manualEan.length >= 8 ? C.good : C.surfaceRaised,
+                      color: scanState === 'idle' && manualEan.length >= 8 ? C.bg : C.inkFaint,
+                      border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px',
+                      cursor: scanState === 'idle' && manualEan.length >= 8 ? 'pointer' : 'default',
+                      display: 'flex', alignItems: 'center',
+                    }}
+                  >
+                    <Check size={16} />
+                  </button>
+                </div>
+                {speechSupported && (
+                  <div className="flex items-center justify-center w-full" style={{ marginTop: '24px', marginBottom: '18px' }}>
+                    <button
+                      type="button"
+                      onClick={listenManualEan}
+                      disabled={scanState !== 'idle' || eanListening}
+                      aria-label="Detta l'EAN"
+                      style={{
+                        width: '96px', height: '96px', borderRadius: '999px',
+                        background: eanListening ? C.good : C.surfaceRaised,
+                        color: eanListening ? C.bg : C.ink,
+                        border: `1px solid ${C.line}`,
+                        cursor: scanState === 'idle' && !eanListening ? 'pointer' : 'default',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        opacity: scanState !== 'idle' ? 0.5 : 1,
+                        animation: eanListening ? 'vt-pulse 1.6s ease-out infinite' : 'none',
+                      }}
+                    >
+                      <Mic size={34} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Prodotto trovato: chiede la quantita' (touch default + mic opzionale, §9.3) */}
             {scanProduct && (scanState === 'asking_qty' || scanState === 'processing' || scanState === 'speaking') && (
@@ -3785,13 +4084,19 @@ export default function VoiceTrackDashboard() {
 // - swipe sx→dx → modifica
 // - swipe dx→sx → box di conferma eliminazione
 // - pulsante Elimina nel pannello → stesso box di conferma
+// MealRow — riga pasto con swipe e pannello modifica inline.
+// - tap sulla riga con pannello aperto → chiude modifica o conferma
+// - swipe sx→dx → barra conferma modifica (verde) → matita apre pannello
+// - swipe dx→sx → barra conferma eliminazione (rossa)
+// - pulsante Elimina nel pannello → stesso box di conferma elimina
 // Le righe non editabili (demo o storiche "legacy-*") restano di sola lettura.
 // ---------------------------------------------------------------------------
 function MealRow({
-  meal, editable, isEditing, confirming, active, swipeX,
-  editDraft, setEditDraft, editBusy, editError, deleteBusy,
-  onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onDelete,
+  meal, editable, isEditing, confirming, confirmingEdit, active, swipeX,
+  editDraft, setEditDraft, editBusy, editError,
+  onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onCancelEditConfirm, onDelete,
   onTouchStart, onTouchMove, onTouchEnd, onCatalogStar, catalogStarFilled, catalogStarBusy,
+  suppressClickRef,
 }) {
   const fonteLabel = String(meal.fonte || '').includes('barcode')
     ? 'barcode'
@@ -3801,7 +4106,94 @@ function MealRow({
         ? 'testo'
         : 'voce';
   const setField = (k, v) => setEditDraft((d) => ({ ...(d || {}), [k]: v }));
+  const OVERLAY_MS = 320;
+  const [deleteMounted, setDeleteMounted] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [editMounted, setEditMounted] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const deleteMountedRef = useRef(false);
+  const editMountedRef = useRef(false);
+  const deleteExitTimerRef = useRef(null);
+  const editExitTimerRef = useRef(null);
+  deleteMountedRef.current = deleteMounted;
+  editMountedRef.current = editMounted;
+
+  useEffect(() => {
+    if (deleteExitTimerRef.current) {
+      clearTimeout(deleteExitTimerRef.current);
+      deleteExitTimerRef.current = null;
+    }
+    if (confirming) {
+      // Chiudi subito l'overlay opposto se ancora montato, per evitare che
+      // le due animazioni (uscita edit + entrata delete) si sovrappongano.
+      if (editExitTimerRef.current) {
+        clearTimeout(editExitTimerRef.current);
+        editExitTimerRef.current = null;
+      }
+      setEditOpen(false);
+      setEditMounted(false);
+      setDeleteMounted(true);
+      const raf = requestAnimationFrame(() => {
+        requestAnimationFrame(() => setDeleteOpen(true));
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    if (deleteMountedRef.current) {
+      setDeleteOpen(false);
+      deleteExitTimerRef.current = setTimeout(() => {
+        setDeleteMounted(false);
+        deleteExitTimerRef.current = null;
+      }, OVERLAY_MS);
+    }
+    return () => {
+      if (deleteExitTimerRef.current) {
+        clearTimeout(deleteExitTimerRef.current);
+        deleteExitTimerRef.current = null;
+      }
+    };
+  }, [confirming]);
+
+  useEffect(() => {
+    if (editExitTimerRef.current) {
+      clearTimeout(editExitTimerRef.current);
+      editExitTimerRef.current = null;
+    }
+    if (confirmingEdit) {
+      // Chiudi subito l'overlay opposto se ancora montato, per evitare che
+      // le due animazioni (uscita delete + entrata edit) si sovrappongano.
+      if (deleteExitTimerRef.current) {
+        clearTimeout(deleteExitTimerRef.current);
+        deleteExitTimerRef.current = null;
+      }
+      setDeleteOpen(false);
+      setDeleteMounted(false);
+      setEditMounted(true);
+      const raf = requestAnimationFrame(() => {
+        requestAnimationFrame(() => setEditOpen(true));
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    if (editMountedRef.current) {
+      setEditOpen(false);
+      editExitTimerRef.current = setTimeout(() => {
+        setEditMounted(false);
+        editExitTimerRef.current = null;
+      }, OVERLAY_MS);
+    }
+    return () => {
+      if (editExitTimerRef.current) {
+        clearTimeout(editExitTimerRef.current);
+        editExitTimerRef.current = null;
+      }
+    };
+  }, [confirmingEdit]);
+
+  const overlayBusy = deleteMounted || editMounted;
   const handleRowClick = () => {
+    if (suppressClickRef?.current) {
+      suppressClickRef.current = false;
+      return;
+    }
     if (!editable || swipeX !== 0) return;
     if (isEditing) {
       onCloseEdit();
@@ -3811,7 +4203,11 @@ function MealRow({
       onCancelDelete();
       return;
     }
-    onOpenEdit(meal);
+    if (confirmingEdit) {
+      onCancelEditConfirm();
+      return;
+    }
+    // Tap semplice: non apre il pannello (solo matita / swipe modifica)
   };
 
   // Pannello edit: montato durante exit così altezza/opacità possono chiudersi.
@@ -3859,12 +4255,14 @@ function MealRow({
 
   const shownDraft = (wantPanel ? editDraft : draftSnap) || draftSnap;
 
+  const forwardTouch = editable && !(overlayBusy && !confirming && !confirmingEdit);
+
   return (
     <div style={{ borderTop: `1px solid ${C.line}` }}>
       {/* Riga con swipe */}
       <div style={{ position: 'relative', overflow: 'hidden' }}>
         {/* Pulsante modifica rivelato sotto durante swipe sx→dx */}
-        {editable && (
+        {editable && !overlayBusy && (
           <button
             onClick={() => onOpenEdit(meal)}
             aria-label="Modifica"
@@ -3878,7 +4276,7 @@ function MealRow({
           </button>
         )}
         {/* Pulsante elimina rivelato sotto durante swipe dx→sx */}
-        {editable && (
+        {editable && !overlayBusy && (
           <button
             onClick={() => onAskDelete(meal.id)}
             aria-label="Elimina"
@@ -3891,36 +4289,50 @@ function MealRow({
             <Trash2 size={18} />
           </button>
         )}
-        {/* Contenuto riga (sopra) */}
+        {/* Contenuto riga (sopra) — in conferma overlay a stessa altezza */}
         <div
           data-no-tab-swipe
-          onTouchStart={editable ? (e) => { e.stopPropagation(); onTouchStart(meal, e); } : undefined}
-          onTouchMove={editable ? (e) => { e.stopPropagation(); onTouchMove(meal, e); } : undefined}
-          onTouchEnd={editable ? (e) => { e.stopPropagation(); onTouchEnd(meal); } : undefined}
+          onTouchStart={forwardTouch ? (e) => { e.stopPropagation(); onTouchStart(meal, e); } : undefined}
+          onTouchMove={forwardTouch ? (e) => { e.stopPropagation(); onTouchMove(meal, e); } : undefined}
+          onTouchEnd={forwardTouch ? (e) => { e.stopPropagation(); onTouchEnd(meal, e); } : undefined}
           onClick={handleRowClick}
           style={{
-            display: 'flex', flexDirection: 'column', gap: '3px',
-            padding: '8px 0', background: C.surface,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '3px',
+            padding: '8px 0',
+            background: C.surface,
             position: 'relative',
-            paddingRight: editable && !isEditing && !confirming ? (onCatalogStar ? '78px' : '42px') : 0,
-            transform: `translateX(${swipeX}px)`,
-            transition: active ? 'none' : 'transform 0.18s ease',
+            paddingRight: editable && !isEditing && !overlayBusy ? (onCatalogStar ? '78px' : '42px') : 0,
+            transform: (overlayBusy || confirming || confirmingEdit) ? 'translateX(0)' : `translateX(${swipeX}px)`,
+            transition: (active || confirming || confirmingEdit || overlayBusy) ? 'none' : 'transform 0.18s ease',
             cursor: editable ? 'pointer' : 'default',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
-            <span style={{ fontSize: '13px', textAlign: 'left' }}>{meal.alimento}</span>
+          {/* Contenuto pasto sempre montato: preserva l'altezza; il wipe lo copre */}
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '3px',
+              pointerEvents: overlayBusy ? 'none' : 'auto',
+            }}
+            aria-hidden={overlayBusy || undefined}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
+              <span style={{ fontSize: '13px', textAlign: 'left' }}>{meal.alimento}</span>
+            </div>
+            <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+              {meal.time} · {meal.grammi}g · {fonteLabel}
+            </span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '12px', color: C.inkMuted }}>
+              {Math.round(meal.kcal)} kcal ·{' '}
+              <span style={{ color: C.protein }}>{Math.round(meal.proteine)}P</span>{' '}
+              <span style={{ color: C.carbs }}>{Math.round(meal.carboidrati)}C</span>{' '}
+              <span style={{ color: C.fat }}>{Math.round(meal.grassi)}G</span>
+            </span>
           </div>
-          <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
-            {meal.time} · {meal.grammi}g · {fonteLabel}
-          </span>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '12px', color: C.inkMuted }}>
-            {Math.round(meal.kcal)} kcal ·{' '}
-            <span style={{ color: C.protein }}>{Math.round(meal.proteine)}P</span>{' '}
-            <span style={{ color: C.carbs }}>{Math.round(meal.carboidrati)}C</span>{' '}
-            <span style={{ color: C.fat }}>{Math.round(meal.grassi)}G</span>
-          </span>
-          {editable && !isEditing && !confirming && (
+          {editable && !isEditing && !overlayBusy && (
             <div
               style={{
                 position: 'absolute',
@@ -3980,23 +4392,184 @@ function MealRow({
               </button>
             </div>
           )}
+          {editMounted && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+                pointerEvents: editOpen && confirmingEdit ? 'auto' : 'none',
+              }}
+            >
+              <div
+                className={`vt-edit-confirm-fill${editOpen ? ' is-open' : ''}`}
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: C.good,
+                }}
+              />
+              <div
+                className={`vt-edit-confirm-content${editOpen ? ' is-open' : ''}`}
+                style={{
+                  position: 'relative',
+                  zIndex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  padding: '0 10px',
+                  height: '100%',
+                }}
+              >
+                <span style={{
+                  fontSize: '13px', color: C.bg, fontWeight: 500, lineHeight: 1.3,
+                  minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {meal.alimento}
+                </span>
+                <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    aria-label="Modifica"
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onTouchEnd={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onOpenEdit(meal); }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: '36px',
+                      height: '36px',
+                      padding: 0,
+                      background: C.bg,
+                      color: C.good,
+                      border: 'none',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Pencil size={18} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Annulla"
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onTouchEnd={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onCancelEditConfirm(); }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: '36px',
+                      height: '36px',
+                      padding: 0,
+                      background: 'transparent',
+                      color: C.bg,
+                      border: `1px solid ${C.bg}`,
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                      opacity: 0.9,
+                    }}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {deleteMounted && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+                pointerEvents: deleteOpen && confirming ? 'auto' : 'none',
+              }}
+            >
+              <div
+                className={`vt-delete-confirm-fill${deleteOpen ? ' is-open' : ''}`}
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: C.alert,
+                }}
+              />
+              <div
+                className={`vt-delete-confirm-content${deleteOpen ? ' is-open' : ''}`}
+                style={{
+                  position: 'relative',
+                  zIndex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  padding: '0 10px',
+                  height: '100%',
+                }}
+              >
+                <span style={{
+                  fontSize: '13px', color: C.bg, fontWeight: 500, lineHeight: 1.3,
+                  minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {meal.alimento}
+                </span>
+                <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    aria-label="Elimina"
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onTouchEnd={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onDelete(meal); }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: '36px',
+                      height: '36px',
+                      padding: 0,
+                      background: C.bg,
+                      color: C.alert,
+                      border: 'none',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Annulla"
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onTouchEnd={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onCancelDelete(); }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: '36px',
+                      height: '36px',
+                      padding: 0,
+                      background: 'transparent',
+                      color: C.bg,
+                      border: `1px solid ${C.bg}`,
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                      opacity: 0.9,
+                    }}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Conferma eliminazione inline (da swipe o da pulsante nel pannello) */}
-      {confirming && (
-        <div style={{ background: C.surfaceRaised, border: `1px solid ${C.alert}`, borderRadius: '10px', padding: '10px 12px', margin: '8px 0' }} className="flex items-center justify-between gap-2">
-          <span style={{ fontSize: '13px' }}>Eliminare «{meal.alimento}»?</span>
-          <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
-            <button onClick={() => onDelete(meal)} disabled={deleteBusy} style={{ background: C.alert, color: C.bg, border: 'none', borderRadius: '6px', padding: '6px 12px', fontSize: '13px', fontWeight: 600, cursor: deleteBusy ? 'default' : 'pointer', opacity: deleteBusy ? 0.6 : 1 }} className="flex items-center gap-1">
-              {deleteBusy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Elimina
-            </button>
-            <button onClick={onCancelDelete} disabled={deleteBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '6px 12px', fontSize: '13px', cursor: deleteBusy ? 'default' : 'pointer' }}>
-              Annulla
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Pannello di modifica inline — apertura/chiusura animata (grid 0fr→1fr) */}
       {panelMounted && shownDraft && (

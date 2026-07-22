@@ -14,6 +14,42 @@
 
 ---
 
+## 2026-07-22 — Mic EAN sotto il campo, più grande (Cursor)
+**Fatto:** pulsante dettatura EAN spostato sotto la riga input+✓ (non più a dx); bottone circolare 56px centrato, icona 24px.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica su telefono.
+
+## 2026-07-22 — Mic dettatura EAN a mano (Cursor)
+**Fatto:** nella card «OPPURE INSERISCI L'EAN A MANO» del tab Scan aggiunto pulsante microfono (stesso pattern di grammi scan/CERCA): SpeechRecognition `it-IT` one-shot, estrae solo le cifre e le scrive nel campo. Stato `eanListening` + abort in `resetScan`.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verifica su telefono con `npm run dev` — dettare EAN cifra per cifra o in blocco, poi conferma ✓.
+
+## 2026-07-22 — Fix focus camera barcode 0.5x (Cursor)
+**Fatto:** in `startScan` apertura camera via `openScanCameraStream()`: prova `deviceId` salvato (`vt-scan-camera-id`), altrimenti `facingMode: environment`; dopo il permesso `enumerateDevices` + scelta back non-ultra-wide e persistenza del deviceId. Constraint track: zoom fisico mirato a 2 (clamp su `caps.zoom`) + `focusMode`/`exposureMode`/`whiteBalanceMode` continuous; fallback zoom di primo livello se `advanced` fallisce. Zoom digitale ridotto da 1.8 a 1.35 (rinforzo dopo lo zoom hardware, non sostituto).
+**Nuove superfici/config:** localStorage `vt-scan-camera-id`.
+**Bug aperti/chiusi:** chiuso (codice) focus camera 0.5x — da verificare su telefono. Invariato ml parsing.
+**Prossimo passo:** test su telefono con `npm run dev` — SCAN: verifica lente ~1x/fuoco, secondo avvio riusa deviceId, EAN ancora ok se serve.
+
+## 2026-07-22 — Swipe modifica: barra verde come elimina (Cursor)
+**Fatto:** swipe sx→dx non apre più subito il pannello: mostra barra verde (`C.good`) a altezza fissa con wipe da sinistra, nome pasto in easing, icone matita + X. Matita → `openEdit` (pannello sotto come prima); X/tap annulla. Stato `confirmEditId` mutuamente esclusivo con conferma elimina.
+**Nuove superfici/config:** `confirmEditId`; CSS `vt-edit-confirm-*`.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verifica su telefono — swipe modifica/elimina, matita apre pannello, X chiude, altezza riga stabile.
+
+## 2026-07-22 — Swipe su altro pasto chiude edit (Cursor)
+**Fatto:** `onRowTouchStart` non blocca più lo swipe se un altro pasto è in modifica o in conferma elimina: chiude quello aperto e avvia lo swipe sul pasto toccato (modifica o elimina). Tap sullo stesso pasto aperto continua a chiudere senza swipe.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verifica su telefono — edit aperto + swipe su altro pasto (sx modifica / dx elimina).
+
+## 2026-07-22 — Conferma elimina sulla barra pasto (Cursor)
+**Fatto:** in `MealRow` la conferma di eliminazione non è più una tendina sotto la riga: dopo swipe (o Elimina dal pannello edit) la riga stessa diventa barra rossa (`C.alert`) con testo «Eliminare «…»?» e pulsanti Elimina/Annulla inline. Swipe disabilitato in conferma; tap Annulla o tap sulla barra chiude come prima.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x). UX conferma delete aggiornata in codice.
+**Prossimo passo:** verifica su telefono con `npm run dev` (swipe elimina → barra rossa; Annulla; Elimina; Elimina da pannello edit).
+
 ## 2026-07-22 — Diario: principio layout unificato oggi/storico (Cursor)
 **Fatto:** nel contenitore `Azioni + macro` del Diario, `flexGrow` non dipende più dal giorno (`dayOffset`): valore unico (`2`) sia per oggi sia per storico. Mantiene identico il principio di distribuzione verticale tra le due card nei due contesti e rimuove l’effetto “macro più piccola” sui giorni passati.
 **Nuove superfici/config:** nessuna.
