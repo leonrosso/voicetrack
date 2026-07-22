@@ -26,6 +26,20 @@ export default defineConfig({
         display: 'standalone',
         orientation: 'portrait',
         start_url: '/',
+        shortcuts: [
+          {
+            name: 'Traccia',
+            short_name: 'Traccia',
+            url: '/?action=voice',
+            icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }],
+          },
+          {
+            name: 'Scansiona',
+            short_name: 'Scansiona',
+            url: '/?action=scan',
+            icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }],
+          },
+        ],
         icons: [
           {
             src: 'pwa-192x192.png',

@@ -1846,15 +1846,28 @@ export default function VoiceTrackDashboard() {
 
   // Card azioni rapide sul Diario: dopo setView, avvia focus / mic / camera.
   // CERCA apre un overlay fisso (non entra nel carosello Traccia).
+  // Se siamo già sul tab target, setView è no-op → esegui subito (deep link / re-entry PWA).
   const launchQuickAction = useCallback((action) => {
     beginLogFlow();
     if (action === 'cerca') {
       openSearch();
       return;
     }
+    const targetView = action === 'scan' ? 'scan' : 'traccia';
+    if (view === targetView) {
+      pendingActionRef.current = null;
+      if (action === 'scan') {
+        startScan();
+      } else if (action === 'voice') {
+        if (micState === 'idle') startListening(false);
+      } else if (action === 'text') {
+        requestAnimationFrame(() => typedInputRef.current?.focus?.({ preventScroll: true }));
+      }
+      return;
+    }
     pendingActionRef.current = action;
-    setView(action === 'scan' ? 'scan' : 'traccia');
-  }, [openSearch, beginLogFlow]);
+    setView(targetView);
+  }, [openSearch, beginLogFlow, view, startScan, startListening, micState]);
 
   useEffect(() => {
     const action = pendingActionRef.current;
@@ -1870,6 +1883,43 @@ export default function VoiceTrackDashboard() {
       startScan();
     }
   }, [view, micState, startListening, startScan]);
+
+  // Deep link ?action=… (Tasker / shortcuts manifest). Pulisce l'URL dopo il consume
+  // così refresh / swipe-back non ri-triggerano. Re-legge su visibility/pageshow perché
+  // la PWA standalone in background spesso non rimonta React.
+  const consumeUrlAction = useCallback(() => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('action');
+    if (!raw) return;
+    const map = {
+      scan: 'scan',
+      cerca: 'cerca',
+      voice: 'voice',
+      voce: 'voice',
+      text: 'text',
+      testo: 'text',
+    };
+    const mapped = map[raw];
+    params.delete('action');
+    const qs = params.toString();
+    const next = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
+    window.history.replaceState(window.history.state, '', next);
+    if (mapped) launchQuickAction(mapped);
+  }, [launchQuickAction]);
+
+  useEffect(() => {
+    consumeUrlAction();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') consumeUrlAction();
+    };
+    const onPageShow = () => consumeUrlAction();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onPageShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onPageShow);
+    };
+  }, [consumeUrlAction]);
 
   // Overlay CERCA aperto: carica frequenti + focus senza scroll-into-view (rompe il carosello).
   useEffect(() => {
@@ -3467,8 +3517,8 @@ export default function VoiceTrackDashboard() {
                 per quando lo scan legge un codice sbagliato (§ segnalazione utente). */}
             {config.apiUrl && scanState !== 'scanning' && (
               <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '14px 20px' }} className="flex flex-col gap-2">
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em' }}>
-                  OPPURE INSERISCI L'EAN A MANO
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em', textAlign: 'center', width: '100%' }}>
+                  INSERIMENTO MANUALE
                 </span>
                 <div className="flex items-center w-full" style={{ gap: '8px' }}>
                   <input
@@ -3497,7 +3547,7 @@ export default function VoiceTrackDashboard() {
                   </button>
                 </div>
                 {speechSupported && (
-                  <div className="flex items-center justify-center w-full" style={{ marginTop: '24px', marginBottom: '18px' }}>
+                  <div className="flex flex-col items-center gap-3 w-full" style={{ marginTop: '24px', marginBottom: '18px' }}>
                     <button
                       type="button"
                       onClick={listenManualEan}
@@ -3516,6 +3566,9 @@ export default function VoiceTrackDashboard() {
                     >
                       <Mic size={34} />
                     </button>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '12px', color: C.inkMuted, letterSpacing: '0.06em' }}>
+                      OPPURE DETTA IL CODICE EAN
+                    </span>
                   </div>
                 )}
               </div>

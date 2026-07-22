@@ -14,6 +14,12 @@
 
 ---
 
+## 2026-07-22 — Didascalia mic EAN (Cursor)
+**Fatto:** sotto il pulsante microfono della card «inserisci l'EAN» (tab Scan) aggiunto il testo «OPPURE DETTA IL CODICE EAN», stesso stile e gap bottone→testo (`gap-3` + mono 12px) della didascalia «TOCCA E INQUADRA» sulla card fotocamera. Titolo card: «INSERIMENTO MANUALE», centrato (ex «OPPURE INSERISCI L'EAN A MANO»).
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica su telefono.
+
 ## 2026-07-22 — Commit + push GitHub + deploy CF (Cursor)
 **Fatto:** commit `ce69ead` (PWA: camera barcode, swipe edit/delete, EAN a voce, mkcert/HTTPS locale + docs) e push su `origin/main`. Deploy Cloud Function `voicetrack` gen2 → revisione `voicetrack-00025-sic`, state ACTIVE; `/health` 200 (`sheet_ok: true`). Backend era già in git (nessuna diff locale); il redeploy porta in produzione catalogo/search/log_catalog, update/delete meal, trend multi-range, match-nome catalogo, `target_date`.
 **Nuove superfici/config:** nessuna nuova; CF live su URL esistenti.
