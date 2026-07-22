@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import {
   Settings, X, SlidersHorizontal,
   Beef, Wheat, Droplet, Mic, AlertCircle, Check, UtensilsCrossed,
   LayoutGrid, Volume2, Loader2, MessageCircleQuestion,
   ChevronLeft, ChevronRight, Send, ScanLine, Camera,
-  Pencil, Trash2, Keyboard, Plus, Minus
+  Pencil, Trash2, Keyboard, Plus, Minus, Search, Star
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
@@ -87,6 +88,9 @@ const SpeechRecognitionAPI =
 // standard: Tasker andra' allineato allo stesso schema.
 const CLARIFY_JOIN = ', ';
 const MAX_CLARIFY_ROUNDS = 3;
+
+/** Normalizza nomi alimento per match catalogo ↔ riga Diario. */
+const normalizeFoodName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 // ---------------------------------------------------------------------------
 // Storage: usa localStorage del browser (persiste tra refresh e riavvii della
@@ -223,6 +227,121 @@ const dayLabel = (d = new Date()) => {
   return s.charAt(0).toUpperCase() + s.slice(1);
 };
 
+const dateForOffset = (offset) => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return d;
+};
+
+// Anteprima giorno adiacente nel carosello Diario (sola lettura, niente interazioni).
+function DayPeek({ offset, meals, loading, error, target }) {
+  const date = dateForOffset(offset);
+  const totals = sumTotals(meals);
+  const remaining = target.kcal - totals.kcal;
+  const overTarget = remaining < 0;
+  const pct = Math.min(totals.kcal / Math.max(target.kcal, 1), 1.25);
+  const grouped = groupByPasto(meals);
+  const macroCalData = [
+    { name: 'Proteine', grams: totals.proteine, cal: totals.proteine * 4, color: C.protein },
+    { name: 'Carboidrati', grams: totals.carboidrati, cal: totals.carboidrati * 4, color: C.carbs },
+    { name: 'Grassi', grams: totals.grassi, cal: totals.grassi * 9, color: C.fat },
+  ];
+  return (
+    <div className="flex flex-col gap-4" style={{ pointerEvents: 'none', userSelect: 'none' }} aria-hidden>
+      <div
+        style={{
+          background: C.surface,
+          border: `1px solid ${C.line}`,
+          borderRadius: '14px',
+          padding: '22px 22px 34px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '14px',
+          minHeight: '160px',
+          boxSizing: 'border-box',
+        }}
+      >
+        <div style={{ textAlign: 'center', fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink }}>
+          {offset === 0 ? dayLabel() : dayLabel(date)}
+        </div>
+        <div className="flex items-end gap-2">
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
+            {loading ? '…' : Math.round(totals.kcal)}
+          </span>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
+            / {target.kcal} kcal
+          </span>
+        </div>
+        <div style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
+          {loading
+            ? 'Carico…'
+            : overTarget
+              ? `Superato di ${Math.round(-remaining)} kcal`
+              : `Restano ${Math.round(remaining)} kcal`}
+        </div>
+        <div style={{ height: '8px', borderRadius: '999px', background: C.line, overflow: 'hidden' }}>
+          <div style={{
+            width: `${Math.min(pct, 1) * 100}%`, height: '100%',
+            background: overTarget ? C.alert : C.good, borderRadius: '999px',
+          }} />
+        </div>
+      </div>
+      <div
+        style={{
+          background: C.surface,
+          border: `1px solid ${C.line}`,
+          borderRadius: '14px',
+          padding: '22px',
+        }}
+      >
+        <span style={{ fontSize: '12px', color: C.inkMuted }}>Macronutrienti</span>
+        <div className="flex items-center gap-4 mt-3">
+          <div style={{ width: '90px', height: '90px', position: 'relative', flexShrink: 0 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={macroCalData} dataKey="cal" innerRadius={28} outerRadius={42} startAngle={90} endAngle={-270} stroke="none">
+                  {macroCalData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '13px' }}>
+            <div style={{ color: C.protein }}>P · {Math.round(totals.proteine)} g</div>
+            <div style={{ color: C.carbs }}>C · {Math.round(totals.carboidrati)} g</div>
+            <div style={{ color: C.fat }}>G · {Math.round(totals.grassi)} g</div>
+          </div>
+        </div>
+      </div>
+      <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
+        <span style={{ fontSize: '12px', color: C.inkMuted }}>
+          {offset === 0 ? 'Pasti di oggi' : `Pasti del ${date.toLocaleDateString('it-IT', { day: 'numeric', month: 'long' })}`} · {meals.length}
+        </span>
+        {error && (
+          <div style={{ color: C.alert, fontSize: '12px', marginTop: '8px' }}>{error}</div>
+        )}
+        {!error && grouped.length === 0 && (
+          <div style={{ color: C.inkFaint, fontSize: '13px', marginTop: '10px' }}>
+            {loading ? 'Carico il giorno…' : 'Nessun pasto registrato in questo giorno.'}
+          </div>
+        )}
+        {grouped.map((g) => (
+          <div key={g.pasto} style={{ marginTop: '12px' }}>
+            <div style={{ fontSize: '11px', fontWeight: 600, color: C.inkMuted, letterSpacing: '0.06em', marginBottom: '4px' }}>
+              {PASTO_LABEL[g.pasto] || g.pasto}
+            </div>
+            {g.items.map((m) => (
+              <div key={m.id} style={{ fontSize: '13px', padding: '6px 0', borderBottom: `1px solid ${C.line}`, display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.alimento}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.inkMuted, flexShrink: 0 }}>{Math.round(m.kcal)}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Ripartizione macro come percentuali (Deploy 5 §7.2).
 // Il target salvato resta in grammi {kcal, proteine, carboidrati, grassi};
@@ -310,11 +429,19 @@ export default function VoiceTrackDashboard() {
 
   // --- Sfoglia diario: 0 = oggi, -1 = ieri, ecc. ---
   const [dayOffset, setDayOffset] = useState(0);
-  const [historyMeals, setHistoryMeals] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState('');
+  // Cache pasti per giorni passati (chiave YYYY-MM-DD) — include prefetch adiacenti.
+  const [dayCache, setDayCache] = useState({});
   // Bump per rieseguire il loader dei giorni passati dopo edit/delete (§5.2 del piano).
   const [historyTick, setHistoryTick] = useState(0);
+
+  // Carosello giorno (stesso pattern del carosello tab): drag + settle.
+  const dayPagerRef = useRef(null);
+  const dayTrackRef = useRef(null);
+  const daySwipeRef = useRef(null);
+  const dayDragXRef = useRef(0);
+  const dayPendingCommitRef = useRef(null);
+  const [dayDragX, setDayDragX] = useState(0);
+  const [dayDragging, setDayDragging] = useState(false);
 
   // --- Edit / delete pasti (Deploy 5 §7.2) ---
   const [editingId, setEditingId] = useState(null);        // id del pasto col pannello aperto
@@ -621,9 +748,11 @@ export default function VoiceTrackDashboard() {
   const recognitionRef = useRef(null);
   const pendingTextRef = useRef('');   // testo accumulato in attesa di chiarimento
   const clarifyRoundsRef = useRef(0);
+  const activeLogDateRef = useRef(''); // YYYY-MM-DD bloccata all'avvio del flusso di log
   const voiceRef = useRef(null);       // voce italiana per SpeechSynthesis
-  const pendingActionRef = useRef(null); // 'text' | 'voice' | 'scan' | null — azioni dalla card Diario
+  const pendingActionRef = useRef(null); // 'text' | 'voice' | 'scan' | 'cerca' | null
   const typedInputRef = useRef(null);
+  const searchInputRef = useRef(null);
 
   const speechSupported = !!SpeechRecognitionAPI && typeof window.speechSynthesis !== 'undefined';
 
@@ -674,15 +803,50 @@ export default function VoiceTrackDashboard() {
     }
   }, []);
 
+  const getDiaryDateStr = useCallback(() => fmtYMD(dateForOffset(dayOffset)), [dayOffset]);
+  const beginLogFlow = useCallback(() => {
+    // Ri-aggancia sempre il giorno attivo: un flusso abbandonato non deve
+    // lasciare una data vecchia nel latch. I passi successivi (chiarimenti
+    // voce, grammi scan) non ripassano di qui e conservano la data del primo step.
+    activeLogDateRef.current = getDiaryDateStr();
+    return activeLogDateRef.current;
+  }, [getDiaryDateStr]);
+  const clearLogFlow = useCallback(() => {
+    activeLogDateRef.current = '';
+  }, []);
+  const getTargetDateForLog = useCallback(
+    () => activeLogDateRef.current || getDiaryDateStr(),
+    [getDiaryDateStr],
+  );
+  const refreshAfterLog = useCallback((targetStr) => {
+    // Aggiorna il giorno su cui il log e' finito davvero (puo' differire da
+    // quello a schermo se l'utente ha cambiato giorno durante il flusso).
+    const t = targetStr || activeLogDateRef.current || getDiaryDateStr();
+    if (t === fmtYMD(new Date())) {
+      fetchLive(config, true);
+    } else {
+      // Butta la cache del giorno target: al prossimo passaggio si ricarica.
+      setDayCache((prev) => {
+        if (!(t in prev)) return prev;
+        const next = { ...prev };
+        delete next[t];
+        return next;
+      });
+    }
+    if (dayOffset !== 0) setHistoryTick((tick) => tick + 1);
+  }, [dayOffset, config, fetchLive, getDiaryDateStr]);
+
   const submitMeal = useCallback(async (spokenText, isClarification, viaVoice = true) => {
     setMicState('processing');
     setTrackError('');
+    if (!isClarification) beginLogFlow();
 
     // Convenzione §3.4: backend stateless → al chiarimento rimandiamo
     // testo originale + risposta concatenati ("un piatto di pasta, 300 grammi").
     const fullText = isClarification && pendingTextRef.current
       ? `${pendingTextRef.current}${CLARIFY_JOIN}${spokenText}`
       : spokenText;
+    const targetDate = getTargetDateForLog();
 
     try {
       const base = config.apiUrl.replace(/\/$/, '');
@@ -692,7 +856,11 @@ export default function VoiceTrackDashboard() {
           'Content-Type': 'application/json',
           ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
         },
-        body: JSON.stringify({ text: fullText, fonte: viaVoice ? 'pwa-voce' : 'pwa-testo' }),
+        body: JSON.stringify({
+          text: fullText,
+          fonte: viaVoice ? 'pwa-voce' : 'pwa-testo',
+          target_date: targetDate,
+        }),
       });
       const json = await res.json().catch(() => null);
       if (!res.ok || !json) throw new Error(`Risposta ${res.status} dal server`);
@@ -702,6 +870,7 @@ export default function VoiceTrackDashboard() {
         if (clarifyRoundsRef.current > MAX_CLARIFY_ROUNDS) {
           pendingTextRef.current = '';
           clarifyRoundsRef.current = 0;
+          clearLogFlow();
           setClarifyQuestion('');
           setTrackError('Troppi chiarimenti di fila: riprova descrivendo il pasto con le quantita\u0300 in grammi.');
           setMicState('idle');
@@ -724,6 +893,7 @@ export default function VoiceTrackDashboard() {
       if (json.status === 'ok') {
         pendingTextRef.current = '';
         clarifyRoundsRef.current = 0;
+        clearLogFlow();
         setClarifyQuestion('');
         setTrackResult(json);
         if (viaVoice) {
@@ -733,12 +903,13 @@ export default function VoiceTrackDashboard() {
         } else {
           setMicState('idle');
         }
-        // Aggiorna la dashboard in silenzio: al passaggio sul Diario e' gia' fresca.
-        fetchLive(config, true);
+        // Aggiorna il giorno mostrato: oggi via dashboard, storico via dayCache.
+        refreshAfterLog(targetDate);
         return;
       }
 
       // status === 'error' (o inatteso) dal backend
+      clearLogFlow();
       const msg = json.riepilogo_vocale || json.message || 'Errore dal server.';
       setTrackError(json.message || msg);
       if (viaVoice) {
@@ -750,12 +921,13 @@ export default function VoiceTrackDashboard() {
     } catch (e) {
       pendingTextRef.current = '';
       clarifyRoundsRef.current = 0;
+      clearLogFlow();
       setClarifyQuestion('');
       setTrackError(e.message || 'Impossibile raggiungere il backend');
       setMicState('idle');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, speak, fetchLive]);
+  }, [config, speak, beginLogFlow, clearLogFlow, getTargetDateForLog, refreshAfterLog]);
 
   const startListening = useCallback((isClarification = false) => {
     if (!SpeechRecognitionAPI) return;
@@ -805,6 +977,7 @@ export default function VoiceTrackDashboard() {
     setTranscript('');
     setTrackError('');
     if (!isClarification) {
+      clearLogFlow();
       setTrackResult(null);
       setClarifyQuestion('');
       pendingTextRef.current = '';
@@ -817,7 +990,7 @@ export default function VoiceTrackDashboard() {
       setMicState('idle');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [submitMeal]);
+  }, [submitMeal, clearLogFlow]);
 
   const onMicTap = useCallback(() => {
     if (micState === 'listening') {
@@ -833,6 +1006,44 @@ export default function VoiceTrackDashboard() {
   // --- Input digitato: stessa pipeline della voce, fonte = pwa-testo ---
   const [typedText, setTypedText] = useState('');
 
+  // Overlay CERCA (catalogo + OFF) — fuori dal carosello, così focus/layout non sfasano i tab
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  const [searchProduct, setSearchProduct] = useState(null); // item selezionato
+  const [searchQty, setSearchQty] = useState('');
+  const [searchLogBusy, setSearchLogBusy] = useState(false);
+  const [searchResult, setSearchResult] = useState(null); // esito log_catalog
+  const [searchQtyListening, setSearchQtyListening] = useState(false);
+  const [searchDragY, setSearchDragY] = useState(0);
+  const [searchDragging, setSearchDragging] = useState(false);
+  const searchDebounceRef = useRef(null);
+  const searchQtyRecRef = useRef(null);
+  const searchDismissRef = useRef(null);
+  const searchDragYRef = useRef(0);
+
+  // Scan not_found → form aggiungi al catalogo
+  const [catalogFormOpen, setCatalogFormOpen] = useState(false);
+  const [catalogForm, setCatalogForm] = useState({ nome: '', kcal: '', proteine: '', carboidrati: '', grassi: '' });
+  const [catalogFormBusy, setCatalogFormBusy] = useState(false);
+  const [catalogFormMsg, setCatalogFormMsg] = useState('');
+  const [scanBarcodeForCatalog, setScanBarcodeForCatalog] = useState('');
+
+  // Diario → salva in catalogo (overlay fuori dal carosello)
+  const [saveCatalogMeal, setSaveCatalogMeal] = useState(null); // meal | null
+  const [saveCatalogForm, setSaveCatalogForm] = useState(null);
+  const [saveCatalogBusy, setSaveCatalogBusy] = useState(false);
+  const [saveCatalogMsg, setSaveCatalogMsg] = useState('');
+  const saveCatalogNomeRef = useRef(null);
+
+  // Indice catalogo per stelline Diario + toggle preferiti CERCA
+  const [catalogItems, setCatalogItems] = useState([]);
+  const [catalogStarBusyId, setCatalogStarBusyId] = useState(null);
+  const [toast, setToast] = useState(null); // { message } | null
+  const toastTimerRef = useRef(null);
+
   const submitTyped = useCallback(() => {
     const t = typedText.trim();
     if (!t || micState !== 'idle') return;
@@ -846,6 +1057,426 @@ export default function VoiceTrackDashboard() {
     }
     submitMeal(t, isClarification, false);
   }, [typedText, micState, submitMeal]);
+
+  // Definita prima dei flussi CERCA/scan che la richiamano nei success path.
+  const fetchCatalog = useCallback(async () => {
+    if (!config.apiUrl) {
+      setCatalogItems([]);
+      return;
+    }
+    try {
+      const base = config.apiUrl.replace(/\/$/, '');
+      const res = await fetch(`${base}/catalog`, {
+        headers: config.apiKey ? { 'X-API-Key': config.apiKey } : {},
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || json.status !== 'ok') return;
+      setCatalogItems(json.items || []);
+    } catch (e) {
+      // silenzioso: le stelline restano vuote se il catalogo non risponde
+    }
+  }, [config]);
+
+  const runSearch = useCallback(async (q) => {
+    if (!config.apiUrl) return;
+    setSearchBusy(true);
+    setSearchError('');
+    try {
+      const base = config.apiUrl.replace(/\/$/, '');
+      const res = await fetch(`${base}/search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
+        },
+        body: JSON.stringify({ q: q || '' }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || json.status !== 'ok') {
+        throw new Error(json?.message || `Risposta ${res.status}`);
+      }
+      setSearchResults(json.items || []);
+    } catch (e) {
+      setSearchError(e.message || 'Ricerca non riuscita');
+      setSearchResults([]);
+    } finally {
+      setSearchBusy(false);
+    }
+  }, [config]);
+
+  const scheduleSearch = useCallback((q) => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => runSearch(q), 280);
+  }, [runSearch]);
+
+  const resetCerca = useCallback(() => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setSearchError('');
+    setSearchProduct(null);
+    setSearchQty('');
+    setSearchResult(null);
+    setSearchLogBusy(false);
+    setSearchBusy(false);
+    try { searchQtyRecRef.current?.abort?.(); } catch (e) {}
+    setSearchQtyListening(false);
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    clearLogFlow();
+    setSearchOpen(false);
+    setSearchDragY(0);
+    setSearchDragging(false);
+    searchDragYRef.current = 0;
+    searchDismissRef.current = null;
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    try { searchQtyRecRef.current?.abort?.(); } catch (e) {}
+    setSearchQtyListening(false);
+    try { recognitionRef.current?.abort?.(); } catch (e) {}
+    setMicState((s) => (s === 'listening' ? 'idle' : s));
+  }, [clearLogFlow]);
+
+  const openSearch = useCallback(() => {
+    resetCerca();
+    setSearchDragY(0);
+    setSearchDragging(false);
+    searchDragYRef.current = 0;
+    searchDismissRef.current = null;
+    setSearchOpen(true);
+  }, [resetCerca]);
+
+  // Swipe verso il basso dalla cima dell'overlay → chiude (come sheet iOS).
+  const SEARCH_DISMISS_MIN = 100;
+  const onSearchDismissStart = useCallback((e) => {
+    if (e.target.closest?.('button, input, textarea, select, a')) {
+      searchDismissRef.current = null;
+      return;
+    }
+    searchDismissRef.current = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY,
+      axis: null,
+    };
+  }, []);
+
+  const onSearchDismissMove = useCallback((e) => {
+    const s = searchDismissRef.current;
+    if (!s) return;
+    const dx = e.touches[0].clientX - s.x;
+    const dy = e.touches[0].clientY - s.y;
+    if (!s.axis) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      s.axis = Math.abs(dy) > Math.abs(dx) * 1.05 ? 'y' : 'x';
+      if (s.axis !== 'y' || dy < 0) {
+        searchDismissRef.current = null;
+        return;
+      }
+      setSearchDragging(true);
+    }
+    if (s.axis !== 'y') return;
+    const y = Math.max(0, dy);
+    searchDragYRef.current = y;
+    setSearchDragY(y);
+  }, []);
+
+  const onSearchDismissEnd = useCallback(() => {
+    const s = searchDismissRef.current;
+    searchDismissRef.current = null;
+    if (!s || s.axis !== 'y') {
+      setSearchDragging(false);
+      setSearchDragY(0);
+      searchDragYRef.current = 0;
+      return;
+    }
+    if (searchDragYRef.current >= SEARCH_DISMISS_MIN) {
+      closeSearch();
+      return;
+    }
+    setSearchDragging(false);
+    setSearchDragY(0);
+    searchDragYRef.current = 0;
+  }, [closeSearch]);
+
+  const selectSearchProduct = useCallback((item) => {
+    setSearchProduct(item);
+    setSearchQty('');
+    setSearchResult(null);
+    setSearchError('');
+  }, []);
+
+  const confirmSearchQty = useCallback(async () => {
+    const n = parseFloat(String(searchQty).replace(',', '.'));
+    if (!searchProduct || !Number.isFinite(n) || n <= 0 || searchLogBusy) return;
+    beginLogFlow();
+    setSearchLogBusy(true);
+    setSearchError('');
+    try {
+      const base = config.apiUrl.replace(/\/$/, '');
+      const targetDate = getTargetDateForLog();
+      const body = {
+        grammi: n,
+        fonte: 'pwa-catalogo',
+        target_date: targetDate,
+      };
+      if (searchProduct.id) body.catalog_id = searchProduct.id;
+      if (searchProduct.barcode) body.barcode = searchProduct.barcode;
+      if (searchProduct.off_code) body.off_code = searchProduct.off_code;
+
+      const res = await fetch(`${base}/log_catalog`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => null);
+      if (!json || json.status !== 'ok') {
+        throw new Error(json?.message || json?.riepilogo_vocale || `Risposta ${res.status}`);
+      }
+      setSearchResult(json);
+      setSearchProduct(null);
+      setSearchQty('');
+      clearLogFlow();
+      speak(json.riepilogo_vocale || 'Prodotto registrato.');
+      refreshAfterLog(targetDate);
+      runSearch(searchQuery);
+      // Il backend ha fatto upsert/bump nel catalogo: riallinea stelline e conteggi.
+      fetchCatalog();
+    } catch (e) {
+      setSearchError(e.message || 'Registrazione non riuscita');
+    } finally {
+      setSearchLogBusy(false);
+    }
+  }, [searchQty, searchProduct, searchLogBusy, config, speak, runSearch, searchQuery, beginLogFlow, getTargetDateForLog, clearLogFlow, refreshAfterLog, fetchCatalog]);
+
+  const listenSearchQty = useCallback(() => {
+    if (!SpeechRecognitionAPI || searchQtyListening || !searchProduct) return;
+    try { window.speechSynthesis?.cancel(); } catch (e) {}
+    const rec = new SpeechRecognitionAPI();
+    rec.lang = 'it-IT';
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (event) => {
+      const said = event.results?.[0]?.[0]?.transcript || '';
+      const m = said.replace(',', '.').match(/\d+(\.\d+)?/);
+      if (m) setSearchQty(m[0]);
+    };
+    rec.onend = () => { searchQtyRecRef.current = null; setSearchQtyListening(false); };
+    rec.onerror = () => { searchQtyRecRef.current = null; setSearchQtyListening(false); };
+    searchQtyRecRef.current = rec;
+    setSearchQtyListening(true);
+    try { rec.start(); } catch (e) { setSearchQtyListening(false); }
+  }, [searchQtyListening, searchProduct]);
+
+  const listenSearchQuery = useCallback(() => {
+    if (!SpeechRecognitionAPI || micState !== 'idle') return;
+    try { window.speechSynthesis?.cancel(); } catch (e) {}
+    const rec = new SpeechRecognitionAPI();
+    rec.lang = 'it-IT';
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (event) => {
+      const said = (event.results?.[0]?.[0]?.transcript || '').trim();
+      if (said) {
+        setSearchQuery(said);
+        runSearch(said);
+      }
+    };
+    recognitionRef.current = rec;
+    setMicState('listening');
+    rec.onend = () => { setMicState('idle'); recognitionRef.current = null; };
+    rec.onerror = () => { setMicState('idle'); recognitionRef.current = null; };
+    try { rec.start(); } catch (e) { setMicState('idle'); }
+  }, [micState, runSearch]);
+
+  const showToast = useCallback((message) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ message });
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  useEffect(() => {
+    if (config.apiUrl) fetchCatalog();
+  }, [config.apiUrl, config.apiKey, fetchCatalog]);
+
+  const findCatalogForAlimento = useCallback((alimento) => {
+    const key = normalizeFoodName(alimento);
+    if (!key || catalogItems.length === 0) return null;
+    const matches = catalogItems.filter((e) => {
+      if (normalizeFoodName(e.nome) === key) return true;
+      const aliases = String(e.alias || '').split(/[,;|]/).map(normalizeFoodName).filter(Boolean);
+      return aliases.includes(key);
+    });
+    if (matches.length === 0) return null;
+    return matches.find((m) => m.preferito) || matches[0];
+  }, [catalogItems]);
+
+  const postCatalog = useCallback(async (payload) => {
+    const base = config.apiUrl.replace(/\/$/, '');
+    const res = await fetch(`${base}/catalog`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json || json.status !== 'ok') {
+      throw new Error(json?.message || `Risposta ${res.status}`);
+    }
+    return json;
+  }, [config]);
+
+  const patchCatalogLocal = useCallback((id, patch) => {
+    setCatalogItems((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+    setSearchResults((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+    setSearchProduct((prev) => (prev && prev.id === id ? { ...prev, ...patch } : prev));
+  }, []);
+
+  const removeCatalogLocal = useCallback((id) => {
+    setCatalogItems((prev) => prev.filter((e) => e.id !== id));
+    setSearchResults((prev) => prev.filter((e) => e.id !== id));
+    setSearchProduct((prev) => (prev && prev.id === id ? null : prev));
+  }, []);
+
+  const toggleCatalogPreferito = useCallback(async (entry) => {
+    if (!entry?.id || catalogStarBusyId) return;
+    const nextPreferito = !entry.preferito;
+    setCatalogStarBusyId(entry.id);
+    try {
+      await postCatalog({ id: entry.id, action: nextPreferito ? 'star' : 'unstar' });
+      patchCatalogLocal(entry.id, { preferito: nextPreferito });
+      showToast(nextPreferito ? 'Aggiunto ai preferiti' : 'Rimosso dai preferiti');
+    } catch (e) {
+      showToast(e.message || 'Operazione non riuscita');
+    } finally {
+      setCatalogStarBusyId(null);
+    }
+  }, [catalogStarBusyId, postCatalog, patchCatalogLocal, showToast]);
+
+  const deleteCatalogItem = useCallback(async (entry) => {
+    if (!entry?.id || catalogStarBusyId) return;
+    if (!window.confirm(`Eliminare «${entry.nome}» dal catalogo?`)) return;
+    setCatalogStarBusyId(entry.id);
+    try {
+      await postCatalog({ id: entry.id, action: 'delete' });
+      removeCatalogLocal(entry.id);
+      showToast('Rimosso dal catalogo');
+    } catch (e) {
+      showToast(e.message || 'Eliminazione non riuscita');
+    } finally {
+      setCatalogStarBusyId(null);
+    }
+  }, [catalogStarBusyId, postCatalog, removeCatalogLocal, showToast]);
+
+  const submitScanCatalogForm = useCallback(async () => {
+    const nome = catalogForm.nome.trim();
+    const kcal = parseFloat(String(catalogForm.kcal).replace(',', '.'));
+    if (!nome || !Number.isFinite(kcal)) {
+      setCatalogFormMsg('Nome e kcal per 100 g obbligatori.');
+      return;
+    }
+    setCatalogFormBusy(true);
+    setCatalogFormMsg('');
+    try {
+      await postCatalog({
+        nome,
+        barcode: scanBarcodeForCatalog || '',
+        off_code: scanBarcodeForCatalog || '',
+        fonte: 'manuale',
+        preferito: true,
+        per_100g: {
+          kcal,
+          proteine: parseFloat(String(catalogForm.proteine).replace(',', '.')) || 0,
+          carboidrati: parseFloat(String(catalogForm.carboidrati).replace(',', '.')) || 0,
+          grassi: parseFloat(String(catalogForm.grassi).replace(',', '.')) || 0,
+        },
+      });
+      setCatalogFormMsg('Salvato nel catalogo.');
+      setCatalogFormOpen(false);
+      setScanNotFound('');
+      setScanBarcodeForCatalog('');
+      await fetchCatalog();
+      showToast('Aggiunto ai preferiti');
+    } catch (e) {
+      setCatalogFormMsg(e.message || 'Salvataggio non riuscito');
+    } finally {
+      setCatalogFormBusy(false);
+    }
+  }, [catalogForm, scanBarcodeForCatalog, postCatalog, fetchCatalog, showToast]);
+
+  const closeSaveCatalog = useCallback(() => {
+    setSaveCatalogMeal(null);
+    setSaveCatalogForm(null);
+    setSaveCatalogMsg('');
+  }, []);
+
+  const openSaveCatalogFromMeal = useCallback((meal) => {
+    const g = Number(meal.grammi) || 0;
+    const factor = g > 0 ? 100 / g : 1;
+    setSaveCatalogMeal(meal);
+    setSaveCatalogMsg('');
+    setSaveCatalogForm({
+      nome: meal.alimento || '',
+      kcal: g > 0 ? String(Math.round((meal.kcal || 0) * factor * 10) / 10) : String(meal.kcal || ''),
+      proteine: g > 0 ? String(Math.round((meal.proteine || 0) * factor * 10) / 10) : String(meal.proteine || ''),
+      carboidrati: g > 0 ? String(Math.round((meal.carboidrati || 0) * factor * 10) / 10) : String(meal.carboidrati || ''),
+      grassi: g > 0 ? String(Math.round((meal.grassi || 0) * factor * 10) / 10) : String(meal.grassi || ''),
+      preferito: true,
+    });
+  }, []);
+
+  const onMealCatalogStarClick = useCallback(async (meal) => {
+    if (!config.apiUrl || !meal) return;
+    const entry = findCatalogForAlimento(meal.alimento);
+    if (!entry) {
+      openSaveCatalogFromMeal(meal);
+      return;
+    }
+    await toggleCatalogPreferito(entry);
+  }, [config.apiUrl, findCatalogForAlimento, openSaveCatalogFromMeal, toggleCatalogPreferito]);
+
+  const submitSaveCatalogFromMeal = useCallback(async () => {
+    if (!saveCatalogForm) return;
+    const nome = saveCatalogForm.nome.trim();
+    const kcal = parseFloat(String(saveCatalogForm.kcal).replace(',', '.'));
+    if (!nome || !Number.isFinite(kcal)) {
+      setSaveCatalogMsg('Nome e kcal per 100 g obbligatori.');
+      return;
+    }
+    setSaveCatalogBusy(true);
+    setSaveCatalogMsg('');
+    try {
+      const isBarcode = String(saveCatalogMeal?.fonte || '').includes('barcode');
+      await postCatalog({
+        nome,
+        fonte: isBarcode ? 'barcode' : 'manuale',
+        preferito: !!saveCatalogForm.preferito,
+        per_100g: {
+          kcal,
+          proteine: parseFloat(String(saveCatalogForm.proteine).replace(',', '.')) || 0,
+          carboidrati: parseFloat(String(saveCatalogForm.carboidrati).replace(',', '.')) || 0,
+          grassi: parseFloat(String(saveCatalogForm.grassi).replace(',', '.')) || 0,
+        },
+      });
+      setSaveCatalogMsg('Salvato nel catalogo.');
+      setSaveCatalogMeal(null);
+      setSaveCatalogForm(null);
+      await fetchCatalog();
+      showToast(saveCatalogForm.preferito ? 'Aggiunto ai preferiti' : 'Salvato nel catalogo');
+    } catch (e) {
+      setSaveCatalogMsg(e.message || 'Salvataggio non riuscito');
+    } finally {
+      setSaveCatalogBusy(false);
+    }
+  }, [saveCatalogForm, saveCatalogMeal, postCatalog, fetchCatalog, showToast]);
 
   const speakSummary = useCallback(async () => {
     if (!config.apiUrl || summaryBusy || micState !== 'idle') return;
@@ -899,6 +1530,7 @@ export default function VoiceTrackDashboard() {
   }, []);
 
   const resetScan = useCallback(() => {
+    clearLogFlow();
     stopCamera();
     try { qtyRecRef.current?.abort?.(); } catch (e) {}
     setScanState('idle');
@@ -908,7 +1540,7 @@ export default function VoiceTrackDashboard() {
     setScanError('');
     setScanNotFound('');
     setQtyListening(false);
-  }, [stopCamera]);
+  }, [stopCamera, clearLogFlow]);
 
   // Uscendo dal tab Scan (o smontando): camera spenta, stato pulito.
   useEffect(() => {
@@ -917,18 +1549,25 @@ export default function VoiceTrackDashboard() {
   }, [view, resetScan]);
 
   const sendBarcode = useCallback(async (barcode, grammi) => {
+    if (grammi == null) beginLogFlow();
     setScanState('processing');
     setScanError('');
     setScanNotFound('');
     try {
       const base = config.apiUrl.replace(/\/$/, '');
+      const targetDate = getTargetDateForLog();
       const res = await fetch(`${base}/scan_barcode`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
         },
-        body: JSON.stringify({ barcode, ...(grammi != null ? { grammi } : {}), fonte: 'pwa-barcode' }),
+        body: JSON.stringify({
+          barcode,
+          ...(grammi != null ? { grammi } : {}),
+          fonte: 'pwa-barcode',
+          target_date: targetDate,
+        }),
       });
       const json = await res.json().catch(() => null);
       if (!json) throw new Error(`Risposta ${res.status} dal server`);
@@ -944,6 +1583,11 @@ export default function VoiceTrackDashboard() {
       if (json.status === 'not_found') {
         // §3.9: esito normale, non un guasto — messaggio chiaro, nessuna riga scritta.
         setScanNotFound(json.message || 'Prodotto non trovato su Open Food Facts.');
+        setScanBarcodeForCatalog(barcode);
+        setCatalogFormOpen(false);
+        setCatalogForm({ nome: '', kcal: '', proteine: '', carboidrati: '', grassi: '' });
+        setCatalogFormMsg('');
+        clearLogFlow();
         setScanState('speaking');
         speak(json.riepilogo_vocale || 'Prodotto non trovato.', () => setScanState('idle'));
         return;
@@ -953,22 +1597,27 @@ export default function VoiceTrackDashboard() {
         setScanProduct(null);
         setScanQty('');
         setScanResult(json);
+        clearLogFlow();
         setScanState('speaking');
         speak(json.riepilogo_vocale || 'Prodotto registrato.', () => setScanState('idle'));
-        fetchLive(config, true); // Diario gia' fresco al prossimo passaggio
+        refreshAfterLog(targetDate);
+        // Lo scan ok fa upsert silenzioso nel catalogo: riallinea le stelline.
+        fetchCatalog();
         return;
       }
 
+      clearLogFlow();
       const msg = json.message || json.riepilogo_vocale || 'Errore dal server.';
       setScanError(msg);
       setScanState('speaking');
       speak(json.riepilogo_vocale || msg, () => setScanState('idle'));
     } catch (e) {
+      clearLogFlow();
       setScanError(e.message || 'Impossibile raggiungere il backend');
       setScanState('idle');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, speak, fetchLive]);
+  }, [config, speak, beginLogFlow, clearLogFlow, getTargetDateForLog, refreshAfterLog, fetchCatalog]);
 
   const startScan = useCallback(async () => {
     if (!barcodeSupported || scanState !== 'idle') return;
@@ -1015,17 +1664,23 @@ export default function VoiceTrackDashboard() {
   }, [barcodeSupported, scanState, sendBarcode, stopCamera]);
 
   // Card azioni rapide sul Diario: dopo setView, avvia focus / mic / camera.
+  // CERCA apre un overlay fisso (non entra nel carosello Traccia).
   const launchQuickAction = useCallback((action) => {
+    beginLogFlow();
+    if (action === 'cerca') {
+      openSearch();
+      return;
+    }
     pendingActionRef.current = action;
     setView(action === 'scan' ? 'scan' : 'traccia');
-  }, []);
+  }, [openSearch, beginLogFlow]);
 
   useEffect(() => {
     const action = pendingActionRef.current;
     if (!action) return;
     if (action === 'text' && view === 'traccia') {
       pendingActionRef.current = null;
-      requestAnimationFrame(() => typedInputRef.current?.focus());
+      requestAnimationFrame(() => typedInputRef.current?.focus?.({ preventScroll: true }));
     } else if (action === 'voice' && view === 'traccia') {
       pendingActionRef.current = null;
       if (micState === 'idle') startListening(false);
@@ -1034,6 +1689,72 @@ export default function VoiceTrackDashboard() {
       startScan();
     }
   }, [view, micState, startListening, startScan]);
+
+  // Overlay CERCA aperto: carica frequenti + focus senza scroll-into-view (rompe il carosello).
+  useEffect(() => {
+    if (!searchOpen) return undefined;
+    runSearch('');
+    fetchCatalog();
+    const t = requestAnimationFrame(() => {
+      searchInputRef.current?.focus?.({ preventScroll: true });
+    });
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeSearch();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      cancelAnimationFrame(t);
+      window.removeEventListener('keydown', onKey);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, [searchOpen, runSearch, closeSearch, fetchCatalog]);
+
+  // Blocca scroll pagina sotto l'overlay (come Obiettivi).
+  useEffect(() => {
+    if (!searchOpen) return undefined;
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.overflow;
+    const prevBody = body.style.overflow;
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      html.style.overflow = prevHtml;
+      body.style.overflow = prevBody;
+    };
+  }, [searchOpen]);
+
+  // Overlay salva-catalogo: focus senza scroll-into-view + Esc (stesso pattern CERCA).
+  const saveCatalogOpen = !!(saveCatalogMeal && saveCatalogForm);
+  useEffect(() => {
+    if (!saveCatalogOpen) return undefined;
+    if (pagerRef.current) pagerRef.current.scrollLeft = 0;
+    const t = requestAnimationFrame(() => {
+      saveCatalogNomeRef.current?.focus?.({ preventScroll: true });
+    });
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeSaveCatalog();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      cancelAnimationFrame(t);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [saveCatalogOpen, closeSaveCatalog]);
+
+  useEffect(() => {
+    if (!saveCatalogOpen) return undefined;
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.overflow;
+    const prevBody = body.style.overflow;
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      html.style.overflow = prevHtml;
+      body.style.overflow = prevBody;
+    };
+  }, [saveCatalogOpen]);
 
   const confirmQty = useCallback(() => {
     const n = parseFloat(String(scanQty).replace(',', '.'));
@@ -1081,43 +1802,189 @@ export default function VoiceTrackDashboard() {
     today.setHours(0, 0, 0, 0);
     targetDate.setHours(0, 0, 0, 0);
     const diffDays = Math.round((targetDate - today) / 86400000);
+    dayPendingCommitRef.current = null;
+    setDayDragging(true);
+    setDayDragX(0);
+    dayDragXRef.current = 0;
     setDayOffset(Math.min(diffDays, 0));
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => setDayDragging(false));
+    });
   }, []);
 
-  // Giorni passati: /daily_summary?date=... ritorna gia' il dettaglio righe.
-  // Il flusso live di oggi (fetchLive + polling) resta intoccato.
-  useEffect(() => {
-    if (dayOffset === 0 || !config.apiUrl) return;
-    let cancelled = false;
-    (async () => {
-      setHistoryLoading(true);
-      setHistoryError('');
-      try {
-        const base = config.apiUrl.replace(/\/$/, '');
-        const res = await fetch(`${base}/daily_summary?date=${selectedDateStr}`, {
-          headers: config.apiKey ? { 'X-API-Key': config.apiKey } : {},
-        });
-        const json = await res.json().catch(() => null);
-        if (!res.ok || !json) throw new Error(`Risposta ${res.status} dal server`);
-        if (!cancelled) {
-          // Preserva l'id reale (UUID) della riga per edit/delete; le righe
-          // storiche senza id ricevono un fallback "legacy-N" (non editabile,
-          // ma key React univoca). §5.4 del piano.
-          setHistoryMeals((json.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` })));
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setHistoryMeals([]);
-          setHistoryError(e.message || 'Impossibile caricare questo giorno');
-        }
-      } finally {
-        if (!cancelled) setHistoryLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [dayOffset, selectedDateStr, config.apiUrl, config.apiKey, historyTick]);
+  const setDayDrag = useCallback((x) => {
+    dayDragXRef.current = x;
+    setDayDragX(x);
+  }, []);
 
-  const displayedMeals = dayOffset === 0 ? meals : historyMeals;
+  // Carosello giorno: dx → giorno prima, sx → giorno dopo (max oggi).
+  // Gesto solo dalla card calorie (data-no-tab-swipe); le tab non si muovono.
+  const DAY_SWIPE_MIN = 56;
+  const DAY_SWIPE_RATIO = 0.22;
+
+  const finishDayCommit = useCallback(() => {
+    const pending = dayPendingCommitRef.current;
+    if (pending == null) return;
+    dayPendingCommitRef.current = null;
+    // 1) transition:none in DOM prima dello snap ±w→0 (altrimenti WebKit anima un secondo swipe).
+    flushSync(() => {
+      setDayDragging(true);
+    });
+    // Forza il browser ad applicare transition:none prima del cambio transform.
+    void dayTrackRef.current?.offsetWidth;
+    flushSync(() => {
+      setDayOffset(pending);
+      if (dayDragXRef.current !== 0) setDayDrag(0);
+    });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => setDayDragging(false));
+    });
+  }, [setDayDrag]);
+
+  const shiftDay = useCallback((delta) => {
+    if (delta < 0 && !config.apiUrl) return;
+    if (dayPendingCommitRef.current != null) return;
+    const next = Math.min(dayOffset + delta, 0);
+    if (next === dayOffset) return;
+    const w = dayPagerRef.current?.offsetWidth || 1;
+    const targetX = delta < 0 ? w : -w;
+    dayPendingCommitRef.current = next;
+    // Se il drag e' gia' sul target, transitionend potrebbe non sparare.
+    if (Math.abs(dayDragXRef.current - targetX) < 2) {
+      finishDayCommit();
+      return;
+    }
+    setDayDragging(false);
+    setDayDrag(targetX);
+  }, [config.apiUrl, dayOffset, setDayDrag, finishDayCommit]);
+
+  const onDayTrackTransitionEnd = useCallback((e) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.propertyName !== 'transform') return;
+    if (dayPendingCommitRef.current == null) return;
+    finishDayCommit();
+  }, [finishDayCommit]);
+
+  const onDaySwipeStart = useCallback((e) => {
+    if (targetsOpen || targetsAnimOpen || dayPendingCommitRef.current != null) {
+      daySwipeRef.current = null;
+      return;
+    }
+    if (e.target.closest?.('button, input, textarea, select, a')) {
+      daySwipeRef.current = null;
+      return;
+    }
+    daySwipeRef.current = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY,
+      axis: null,
+      width: dayPagerRef.current?.offsetWidth || 1,
+    };
+  }, [targetsOpen, targetsAnimOpen]);
+
+  const onDaySwipeMove = useCallback((e) => {
+    const s = daySwipeRef.current;
+    if (!s) return;
+    const dx = e.touches[0].clientX - s.x;
+    const dy = e.touches[0].clientY - s.y;
+    if (!s.axis) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      s.axis = Math.abs(dx) > Math.abs(dy) * 1.1 ? 'x' : 'y';
+      if (s.axis === 'y') {
+        daySwipeRef.current = null;
+        return;
+      }
+      setDayDragging(true);
+    }
+    if (s.axis !== 'x') return;
+    let x = dx;
+    // Rubber-band: niente futuro da oggi; niente passato senza API.
+    if ((dayOffset === 0 && x < 0) || (!config.apiUrl && x > 0)) x *= 0.35;
+    setDayDrag(x);
+  }, [dayOffset, config.apiUrl, setDayDrag]);
+
+  const onDaySwipeEnd = useCallback(() => {
+    const s = daySwipeRef.current;
+    daySwipeRef.current = null;
+    if (!s || s.axis !== 'x') {
+      // Non interrompere un settle in corso (touchcancel / secondo end dopo shiftDay).
+      if (dayPendingCommitRef.current != null) return;
+      setDayDragging(false);
+      setDayDrag(0);
+      return;
+    }
+    const w = s.width || 1;
+    const dx = dayDragXRef.current;
+    const enough = Math.abs(dx) >= Math.max(DAY_SWIPE_MIN, w * DAY_SWIPE_RATIO);
+    if (enough && dx > 0 && config.apiUrl) {
+      shiftDay(-1);
+    } else if (enough && dx < 0 && dayOffset < 0) {
+      shiftDay(1);
+    } else {
+      setDayDragging(false);
+      setDayDrag(0);
+    }
+  }, [config.apiUrl, dayOffset, shiftDay, setDayDrag]);
+
+  // Carica giorno corrente + prefetch adiacenti in dayCache.
+  const dayCacheRef = useRef(dayCache);
+  dayCacheRef.current = dayCache;
+
+  useEffect(() => {
+    if (!config.apiUrl) return;
+    let cancelled = false;
+    const offsets = [...new Set([dayOffset, dayOffset - 1, dayOffset + 1])].filter((o) => o < 0);
+
+    offsets.forEach((o) => {
+      const str = fmtYMD(dateForOffset(o));
+      const force = o === dayOffset;
+      const cached = dayCacheRef.current[str];
+      // Prefetch: salta se già caricato ok; il giorno selezionato si ricarica sempre (historyTick).
+      if (!force && cached && !cached.loading && Array.isArray(cached.meals) && !cached.error) return;
+
+      setDayCache((prev) => ({
+        ...prev,
+        [str]: { meals: prev[str]?.meals ?? [], loading: true, error: '' },
+      }));
+      (async () => {
+        try {
+          const base = config.apiUrl.replace(/\/$/, '');
+          const res = await fetch(`${base}/daily_summary?date=${str}`, {
+            headers: config.apiKey ? { 'X-API-Key': config.apiKey } : {},
+          });
+          const json = await res.json().catch(() => null);
+          if (!res.ok || !json) throw new Error(`Risposta ${res.status} dal server`);
+          if (cancelled) return;
+          const loaded = (json.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` }));
+          setDayCache((prev) => ({ ...prev, [str]: { meals: loaded, loading: false, error: '' } }));
+        } catch (e) {
+          if (cancelled) return;
+          setDayCache((prev) => ({
+            ...prev,
+            [str]: { meals: prev[str]?.meals ?? [], loading: false, error: e.message || 'Impossibile caricare questo giorno' },
+          }));
+        }
+      })();
+    });
+
+    return () => { cancelled = true; };
+  }, [dayOffset, config.apiUrl, config.apiKey, historyTick]);
+
+  const mealsForOffset = useCallback((o) => {
+    if (o === 0) return meals;
+    if (o > 0) return [];
+    return dayCache[fmtYMD(dateForOffset(o))]?.meals ?? [];
+  }, [meals, dayCache]);
+
+  const metaForOffset = useCallback((o) => {
+    if (o >= 0) return { loading: false, error: '' };
+    const entry = dayCache[fmtYMD(dateForOffset(o))];
+    return { loading: !!entry?.loading, error: entry?.error || '' };
+  }, [dayCache]);
+
+  const displayedMeals = dayOffset === 0 ? meals : (dayCache[selectedDateStr]?.meals ?? []);
+  const historyLoading = dayOffset !== 0 && !!dayCache[selectedDateStr]?.loading;
+  const historyError = dayOffset !== 0 ? (dayCache[selectedDateStr]?.error || '') : '';
 
   // =========================================================================
   // Edit / delete di un pasto (Deploy 5 §7.2)
@@ -1315,8 +2182,8 @@ export default function VoiceTrackDashboard() {
   }, []);
 
   const tabSwipeBlocked = useCallback(
-    () => configOpen || targetsOpen || !!editingId || !!confirmDeleteId || scanState === 'scanning',
-    [configOpen, targetsOpen, editingId, confirmDeleteId, scanState]
+    () => configOpen || targetsOpen || searchOpen || saveCatalogOpen || !!editingId || !!confirmDeleteId || scanState === 'scanning' || dayDragging || dayPendingCommitRef.current != null,
+    [configOpen, targetsOpen, searchOpen, saveCatalogOpen, editingId, confirmDeleteId, scanState, dayDragging]
   );
 
   const isTabSwipeBlockedTarget = (el) =>
@@ -1537,6 +2404,7 @@ export default function VoiceTrackDashboard() {
           ref={pagerRef}
             style={{
             overflow: 'hidden',
+            overflowX: 'clip',
             minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
             touchAction: 'pan-y',
             marginLeft: '-16px',
@@ -1563,6 +2431,8 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
+                minWidth: 0,
+                maxWidth: '100%',
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
@@ -1570,6 +2440,40 @@ export default function VoiceTrackDashboard() {
               }}
               aria-hidden={view !== 'diario'}
             >
+        {/* Carosello giorno: 3 slot (ieri | oggi | domani). Gesto solo sulla card calorie.
+            Trend resta fuori così non scorre con il giorno. */}
+        <div
+          ref={dayPagerRef}
+          style={{
+            overflow: 'hidden',
+            overflowX: 'clip',
+            width: '100%',
+            maxWidth: '100%',
+            minWidth: 0,
+            alignSelf: 'stretch',
+          }}
+        >
+          <div
+            ref={dayTrackRef}
+            style={{
+              display: 'flex',
+              width: '100%',
+              transform: `translateX(calc(-100% + ${dayDragX}px))`,
+              transition: dayDragging ? 'none' : 'transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1)',
+              willChange: 'transform',
+            }}
+            onTransitionEnd={onDayTrackTransitionEnd}
+          >
+            <div style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
+              <DayPeek
+                offset={dayOffset - 1}
+                meals={mealsForOffset(dayOffset - 1)}
+                loading={metaForOffset(dayOffset - 1).loading}
+                error={metaForOffset(dayOffset - 1).error}
+                target={target}
+              />
+            </div>
+            <div className="flex flex-col gap-4" style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
         {/* Above the fold: calorie + azioni + macro riempiono la prima viewport.
             Con Obiettivi aperto la card calorie prende tutto lo schermo utile. */}
         <div
@@ -1583,8 +2487,14 @@ export default function VoiceTrackDashboard() {
             flexShrink: 0,
           }}
         >
-        {/* Hero: tre slot fissi — data | medio (readout / Obiettivi) | gauge */}
+        {/* Hero: tre slot fissi — data | medio (readout / Obiettivi) | gauge.
+            Swipe orizzontale qui cambia giorno (non le tab: data-no-tab-swipe). */}
         <div
+          data-no-tab-swipe
+          onTouchStart={onDaySwipeStart}
+          onTouchMove={onDaySwipeMove}
+          onTouchEnd={onDaySwipeEnd}
+          onTouchCancel={onDaySwipeEnd}
           style={{
             background: C.surface,
             border: `1px solid ${C.line}`,
@@ -1597,6 +2507,7 @@ export default function VoiceTrackDashboard() {
             minHeight: 0,
             overflowY: targetsMounted ? 'hidden' : undefined,
             boxSizing: 'border-box',
+            touchAction: 'pan-y',
           }}
         >
           {/* Slot data: nascosto con Obiettivi aperto; torna insieme ad azioni (gate targetsAnimOpen). */}
@@ -1614,7 +2525,7 @@ export default function VoiceTrackDashboard() {
           >
             <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
               <button
-                onClick={() => setDayOffset((o) => o - 1)}
+                onClick={() => shiftDay(-1)}
                 disabled={!config.apiUrl}
                 aria-label="Giorno precedente"
                 style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: config.apiUrl ? 1 : 0.4 }}
@@ -1626,13 +2537,13 @@ export default function VoiceTrackDashboard() {
                   {dayOffset === 0 ? dayLabel() : dayLabel(selectedDate)}
                 </span>
                 {dayOffset !== 0 && (
-                  <button onClick={() => setDayOffset(0)} style={{ color: C.good, background: 'transparent', border: `1px solid ${C.line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
+                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${C.line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
                     {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
                   </button>
                 )}
               </div>
               <button
-                onClick={() => setDayOffset((o) => Math.min(o + 1, 0))}
+                onClick={() => shiftDay(1)}
                 disabled={dayOffset === 0}
                 aria-label="Giorno successivo"
                 style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: dayOffset === 0 ? 0.3 : 1 }}
@@ -1804,7 +2715,7 @@ export default function VoiceTrackDashboard() {
             display: 'flex',
             flexDirection: 'column',
             gap: '22px',
-            flexGrow: targetsAnimOpen ? 0 : (dayOffset === 0 ? 2 : 1),
+            flexGrow: targetsAnimOpen ? 0 : 2,
             flexBasis: 0,
             minHeight: 0,
             marginTop: targetsAnimOpen ? 0 : '22px',
@@ -1816,7 +2727,6 @@ export default function VoiceTrackDashboard() {
           aria-hidden={targetsAnimOpen}
         >
         {/* Azioni rapide: testo / barcode / voce → tab Traccia o Scan */}
-        {dayOffset === 0 && (
           <div
             style={{
               background: C.surface,
@@ -1832,17 +2742,18 @@ export default function VoiceTrackDashboard() {
           >
             <div className="flex items-center" style={{ justifyContent: 'space-around' }}>
               {[
-                { id: 'text', label: 'TESTO', aria: 'Scrivi un pasto', icon: <Keyboard size={24} />, action: 'text' },
-                { id: 'scan', label: 'SCAN', aria: 'Scansiona un barcode', icon: <ScanLine size={24} />, action: 'scan' },
-                { id: 'voice', label: 'VOCE', aria: 'Registra a voce', icon: <Mic size={24} />, action: 'voice' },
+                { id: 'text', label: 'TESTO', aria: 'Scrivi un pasto', icon: <Keyboard size={22} />, action: 'text' },
+                { id: 'cerca', label: 'CERCA', aria: 'Cerca nel catalogo', icon: <Search size={22} />, action: 'cerca' },
+                { id: 'scan', label: 'SCAN', aria: 'Scansiona un barcode', icon: <ScanLine size={22} />, action: 'scan' },
+                { id: 'voice', label: 'VOCE', aria: 'Registra a voce', icon: <Mic size={22} />, action: 'voice' },
               ].map((btn) => (
-                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '10px' }}>
+                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '8px' }}>
                   <button
                     type="button"
                     onClick={() => launchQuickAction(btn.action)}
                     aria-label={btn.aria}
                     style={{
-                      width: '66px', height: '66px', borderRadius: '999px',
+                      width: '56px', height: '56px', borderRadius: '999px',
                       border: `1px solid ${C.line}`,
                       background: C.surfaceRaised,
                       color: C.ink,
@@ -1852,14 +2763,13 @@ export default function VoiceTrackDashboard() {
                   >
                     {btn.icon}
                   </button>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em' }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '10px', color: C.inkMuted, letterSpacing: '0.06em' }}>
                     {btn.label}
                   </span>
                 </div>
               ))}
             </div>
           </div>
-        )}
 
         {/* Plate / macro breakdown */}
         <div
@@ -1925,35 +2835,55 @@ export default function VoiceTrackDashboard() {
                   <div style={{ fontSize: '11px', fontWeight: 600, color: C.inkMuted, letterSpacing: '0.06em', marginBottom: '6px' }}>
                     {PASTO_LABEL[g.pasto] || g.pasto}
                   </div>
-                  {g.items.map((m) => (
-                    <MealRow
-                      key={m.id}
-                      meal={m}
-                      editable={isEditable(m)}
-                      isEditing={editingId === m.id}
-                      confirming={confirmDeleteId === m.id}
-                      active={swipeId === m.id}
-                      swipeX={swipeId === m.id ? swipeX : 0}
-                      editDraft={editDraft}
-                      setEditDraft={setEditDraft}
-                      editBusy={editBusy}
-                      editError={editError}
-                      deleteBusy={deleteBusy}
-                      onOpenEdit={openEdit}
-                      onCloseEdit={closeEdit}
-                      onSave={saveEdit}
-                      onAskDelete={setConfirmDeleteId}
-                      onCancelDelete={() => { setConfirmDeleteId(null); setSwipeId(null); setSwipeX(0); }}
-                      onDelete={deleteMeal}
-                      onTouchStart={onRowTouchStart}
-                      onTouchMove={onRowTouchMove}
-                      onTouchEnd={onRowTouchEnd}
-                    />
-                  ))}
+                  {g.items.map((m) => {
+                    const catEntry = findCatalogForAlimento(m.alimento);
+                    return (
+                      <MealRow
+                        key={m.id}
+                        meal={m}
+                        editable={isEditable(m)}
+                        isEditing={editingId === m.id}
+                        confirming={confirmDeleteId === m.id}
+                        active={swipeId === m.id}
+                        swipeX={swipeId === m.id ? swipeX : 0}
+                        editDraft={editDraft}
+                        setEditDraft={setEditDraft}
+                        editBusy={editBusy}
+                        editError={editError}
+                        deleteBusy={deleteBusy}
+                        onOpenEdit={openEdit}
+                        onCloseEdit={closeEdit}
+                        onSave={saveEdit}
+                        onAskDelete={setConfirmDeleteId}
+                        onCancelDelete={() => { setConfirmDeleteId(null); setSwipeId(null); setSwipeX(0); }}
+                        onDelete={deleteMeal}
+                        onTouchStart={onRowTouchStart}
+                        onTouchMove={onRowTouchMove}
+                        onTouchEnd={onRowTouchEnd}
+                        onCatalogStar={config.apiUrl ? onMealCatalogStarClick : undefined}
+                        catalogStarFilled={!!catEntry?.preferito}
+                        catalogStarBusy={!!catEntry?.id && catalogStarBusyId === catEntry.id}
+                      />
+                    );
+                  })}
                 </div>
               ))}
             </div>
           )}
+        </div>
+            </div>
+            <div style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
+              {dayOffset < 0 ? (
+                <DayPeek
+                  offset={dayOffset + 1}
+                  meals={mealsForOffset(dayOffset + 1)}
+                  loading={metaForOffset(dayOffset + 1).loading}
+                  error={metaForOffset(dayOffset + 1).error}
+                  target={target}
+                />
+              ) : null}
+            </div>
+          </div>
         </div>
 
         {/* Trend: settimana / mese / anno */}
@@ -2033,6 +2963,8 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
+                minWidth: 0,
+                maxWidth: '100%',
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
@@ -2207,6 +3139,8 @@ export default function VoiceTrackDashboard() {
               className="flex flex-col gap-4"
               style={{
                 flex: '0 0 100%',
+                minWidth: 0,
+                maxWidth: '100%',
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
@@ -2352,12 +3286,71 @@ export default function VoiceTrackDashboard() {
                   <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '2px' }} />
                   <span>{scanNotFound}</span>
                 </div>
-                <button
-                  onClick={() => goToTab('traccia')}
-                  style={{ alignSelf: 'flex-start', background: 'transparent', color: C.good, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}
-                >
-                  Registralo a voce →
-                </button>
+                {!catalogFormOpen ? (
+                  <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => setCatalogFormOpen(true)}
+                      style={{ alignSelf: 'flex-start', background: C.good, color: C.bg, border: 'none', borderRadius: '8px', padding: '6px 12px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Aggiungi al catalogo
+                    </button>
+                    <button
+                      onClick={() => { goToTab('traccia'); }}
+                      style={{ alignSelf: 'flex-start', background: 'transparent', color: C.good, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}
+                    >
+                      Registralo a voce →
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2" style={{ marginTop: '4px' }}>
+                    <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      Valori per 100 g{scanBarcodeForCatalog ? ` · EAN ${scanBarcodeForCatalog}` : ''}
+                    </span>
+                    <input
+                      value={catalogForm.nome}
+                      onChange={(e) => setCatalogForm((f) => ({ ...f, nome: e.target.value }))}
+                      placeholder="Nome prodotto"
+                      style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '8px 10px', fontSize: '13px' }}
+                    />
+                    <div className="flex" style={{ gap: '6px' }}>
+                      {[
+                        { k: 'kcal', ph: 'kcal' },
+                        { k: 'proteine', ph: 'P' },
+                        { k: 'carboidrati', ph: 'C' },
+                        { k: 'grassi', ph: 'G' },
+                      ].map((f) => (
+                        <input
+                          key={f.k}
+                          value={catalogForm[f.k]}
+                          onChange={(e) => setCatalogForm((prev) => ({ ...prev, [f.k]: e.target.value }))}
+                          inputMode="decimal"
+                          placeholder={f.ph}
+                          style={{ flex: 1, background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '8px 6px', fontSize: '12px', fontFamily: "'IBM Plex Mono', monospace", minWidth: 0 }}
+                        />
+                      ))}
+                    </div>
+                    {catalogFormMsg && (
+                      <span style={{ fontSize: '12px', color: catalogFormMsg.includes('Salvato') ? C.good : C.alert }}>{catalogFormMsg}</span>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={submitScanCatalogForm}
+                        disabled={catalogFormBusy}
+                        style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', fontWeight: 600, cursor: catalogFormBusy ? 'default' : 'pointer', opacity: catalogFormBusy ? 0.6 : 1 }}
+                      >
+                        {catalogFormBusy ? 'Salvo…' : 'Salva'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setCatalogFormOpen(false); setCatalogFormMsg(''); }}
+                        style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '8px 12px', fontSize: '12px', cursor: 'pointer' }}
+                      >
+                        Annulla
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2409,6 +3402,372 @@ export default function VoiceTrackDashboard() {
           </div>
         </div>
       </div>
+      {searchOpen && (
+        <div
+          data-no-tab-swipe
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cerca prodotto"
+          onClick={(e) => { if (e.target === e.currentTarget) closeSearch(); }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 60,
+            background: `rgba(18, 22, 19, ${0.78 * (1 - Math.min(searchDragY / 280, 0.55))})`,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'stretch',
+            paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
+            paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))',
+            paddingLeft: 'max(12px, env(safe-area-inset-left, 0px))',
+            paddingRight: 'max(12px, env(safe-area-inset-right, 0px))',
+            boxSizing: 'border-box',
+          }}
+        >
+          <div
+            className="flex flex-col"
+            style={{
+              width: '100%',
+              maxWidth: '420px',
+              background: C.bg,
+              borderRadius: '16px',
+              border: `1px solid ${C.line}`,
+              overflow: 'hidden',
+              maxHeight: '100%',
+              transform: searchDragY ? `translateY(${searchDragY}px)` : 'none',
+              transition: searchDragging ? 'none' : 'transform 0.22s ease-out',
+              willChange: searchDragging ? 'transform' : 'auto',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="flex items-center justify-between"
+              style={{
+                padding: '14px 16px',
+                borderBottom: `1px solid ${C.line}`,
+                flexShrink: 0,
+                touchAction: 'none',
+                cursor: 'grab',
+              }}
+              onTouchStart={onSearchDismissStart}
+              onTouchMove={onSearchDismissMove}
+              onTouchEnd={onSearchDismissEnd}
+              onTouchCancel={onSearchDismissEnd}
+            >
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '12px', letterSpacing: '0.08em', fontWeight: 600 }}>CERCA</span>
+              <button type="button" onClick={closeSearch} aria-label="Chiudi" style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: 'pointer', padding: '4px', display: 'flex' }}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex flex-col gap-3" style={{ padding: '14px 16px', flexShrink: 0 }}>
+              {!config.apiUrl ? (
+                <div className="flex items-start gap-2" style={{ color: C.inkMuted, fontSize: '13px' }}>
+                  <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px', color: C.amber }} />
+                  <span>Collega l'endpoint dalle impostazioni per cercare nel catalogo.</span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center" style={{ gap: '8px' }}>
+                    <input
+                      ref={searchInputRef}
+                      value={searchQuery}
+                      onChange={(e) => { const v = e.target.value; setSearchQuery(v); scheduleSearch(v); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); runSearch(searchQuery); } }}
+                      placeholder="Cerca prodotto o frequenti…"
+                      style={{ flex: 1, background: C.surface, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '10px 12px', fontSize: '14px' }}
+                    />
+                    {speechSupported && (
+                      <button type="button" onClick={listenSearchQuery} disabled={micState !== 'idle'} aria-label="Cerca a voce" style={{ background: micState === 'listening' ? C.good : C.surfaceRaised, color: micState === 'listening' ? C.bg : C.ink, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px', cursor: micState === 'idle' ? 'pointer' : 'default', display: 'flex', alignItems: 'center', animation: micState === 'listening' ? 'vt-pulse 1.6s ease-out infinite' : 'none' }}>
+                        <Mic size={16} />
+                      </button>
+                    )}
+                    <button type="button" onClick={() => runSearch(searchQuery)} aria-label="Cerca" style={{ background: C.good, color: C.bg, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                      {searchBusy ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+                    </button>
+                  </div>
+                  <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    {searchQuery.trim() ? 'Risultati catalogo + Open Food Facts' : 'I tuoi frequenti e preferiti'}
+                  </span>
+                </>
+              )}
+            </div>
+            <div className="flex flex-col gap-3" style={{ padding: '0 16px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+              {searchProduct && (
+                <div style={{ background: C.surface, border: `1px solid ${C.good}`, borderRadius: '14px', padding: '16px' }} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-col" style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ fontSize: '14px', fontWeight: 600 }}>{searchProduct.nome}</span>
+                      <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+                        {Math.round(searchProduct.per_100g?.kcal || 0)} kcal/100g
+                        {searchProduct.origine === 'off' ? ' · OFF' : ''}
+                      </span>
+                    </div>
+                    {searchProduct.origine !== 'off' && searchProduct.id && (
+                      <button
+                        type="button"
+                        aria-label={searchProduct.preferito ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}
+                        disabled={catalogStarBusyId === searchProduct.id}
+                        onClick={() => toggleCatalogPreferito(searchProduct)}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '36px', height: '36px', padding: 0, flexShrink: 0,
+                          background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '8px',
+                          color: C.amber, cursor: catalogStarBusyId === searchProduct.id ? 'default' : 'pointer',
+                          opacity: catalogStarBusyId === searchProduct.id ? 0.55 : 1,
+                        }}
+                      >
+                        <Star size={16} fill={searchProduct.preferito ? 'currentColor' : 'none'} />
+                      </button>
+                    )}
+                    <button type="button" onClick={() => setSearchProduct(null)} style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: 'pointer', padding: '4px' }} aria-label="Annulla">
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="flex items-center" style={{ gap: '8px' }}>
+                    <input value={searchQty} onChange={(e) => setSearchQty(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') confirmSearchQty(); }} inputMode="decimal" placeholder="Grammi…" style={{ flex: 1, background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '10px 12px', fontSize: '14px' }} />
+                    {speechSupported && (
+                      <button type="button" onClick={listenSearchQty} disabled={searchQtyListening || searchLogBusy} aria-label="Grammi a voce" style={{ background: searchQtyListening ? C.good : C.surfaceRaised, color: searchQtyListening ? C.bg : C.ink, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px', cursor: !searchQtyListening ? 'pointer' : 'default', display: 'flex', alignItems: 'center', animation: searchQtyListening ? 'vt-pulse 1.6s ease-out infinite' : 'none' }}>
+                        <Mic size={16} />
+                      </button>
+                    )}
+                    <button type="button" onClick={confirmSearchQty} disabled={searchLogBusy || !(parseFloat(String(searchQty).replace(',', '.')) > 0)} aria-label="Conferma" style={{ background: parseFloat(String(searchQty).replace(',', '.')) > 0 ? C.good : C.surfaceRaised, color: parseFloat(String(searchQty).replace(',', '.')) > 0 ? C.bg : C.inkFaint, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                      {searchLogBusy ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {searchError && (
+                <div className="flex items-start gap-2" style={{ background: C.surface, border: `1px solid ${C.alert}`, borderRadius: '14px', padding: '14px', color: C.alert, fontSize: '13px' }}>
+                  <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <span>{searchError}</span>
+                </div>
+              )}
+              {searchResult?.items && (
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '16px' }}>
+                  <div className="flex items-center gap-2" style={{ color: C.good, fontSize: '12px', fontWeight: 600 }}>
+                    <Check size={15} /> Registrato
+                  </div>
+                  <div className="flex flex-col mt-2">
+                    {searchResult.items.map((it, i) => (
+                      <div key={i} className="flex items-center justify-between" style={{ padding: '6px 0', borderTop: i === 0 ? 'none' : `1px solid ${C.line}` }}>
+                        <div className="flex flex-col">
+                          <span style={{ fontSize: '13px' }}>{it.alimento}</span>
+                          <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>{it.grammi}g</span>
+                        </div>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', color: C.inkMuted }}>{Math.round(it.kcal)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!searchProduct && (
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '8px 12px' }}>
+                  {searchBusy && searchResults.length === 0 ? (
+                    <div className="flex items-center gap-2" style={{ color: C.inkMuted, fontSize: '13px', padding: '8px 0' }}>
+                      <Loader2 size={14} className="animate-spin" /> Cerco…
+                    </div>
+                  ) : searchResults.length === 0 ? (
+                    <div style={{ color: C.inkFaint, fontSize: '13px', padding: '8px 0' }}>
+                      Nessun risultato. Scansiona un prodotto o aggiungilo al catalogo.
+                    </div>
+                  ) : (
+                    <div className="flex flex-col">
+                      {searchResults.map((item, idx) => {
+                        const isCatalog = item.origine !== 'off' && !!item.id;
+                        const starBusy = catalogStarBusyId === item.id;
+                        return (
+                          <div
+                            key={item.id || item.barcode || `${item.nome}-${idx}`}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: '6px',
+                              padding: '6px 0',
+                              borderTop: idx === 0 ? 'none' : `1px solid ${C.line}`,
+                            }}
+                          >
+                            {isCatalog && (
+                              <button
+                                type="button"
+                                aria-label={item.preferito ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}
+                                disabled={starBusy}
+                                onClick={() => toggleCatalogPreferito(item)}
+                                style={{
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                  width: '32px', height: '32px', padding: 0, flexShrink: 0,
+                                  background: 'transparent', border: 'none',
+                                  color: C.amber, cursor: starBusy ? 'default' : 'pointer',
+                                  opacity: starBusy ? 0.55 : 1,
+                                }}
+                              >
+                                <Star size={15} fill={item.preferito ? 'currentColor' : 'none'} />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => selectSearchProduct(item)}
+                              style={{
+                                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px',
+                                flex: 1, minWidth: 0, padding: '4px 0',
+                                background: 'transparent', border: 'none', color: C.ink,
+                                cursor: 'pointer', textAlign: 'left',
+                              }}
+                            >
+                              <div className="flex flex-col" style={{ minWidth: 0 }}>
+                                <span style={{ fontSize: '13px' }}>{item.nome}</span>
+                                <span style={{ fontSize: '11px', color: C.inkFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                  {Math.round(item.per_100g?.kcal || 0)} kcal/100g · {item.origine === 'off' ? 'OFF' : 'catalogo'}{item.volte > 0 ? ` · ${item.volte}×` : ''}
+                                </span>
+                              </div>
+                              <ChevronRight size={16} style={{ color: C.inkFaint, flexShrink: 0 }} />
+                            </button>
+                            {isCatalog && (
+                              <button
+                                type="button"
+                                aria-label="Elimina dal catalogo"
+                                disabled={starBusy}
+                                onClick={() => deleteCatalogItem(item)}
+                                style={{
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                  width: '32px', height: '32px', padding: 0, flexShrink: 0,
+                                  background: 'transparent', border: 'none',
+                                  color: C.inkFaint, cursor: starBusy ? 'default' : 'pointer',
+                                  opacity: starBusy ? 0.55 : 1,
+                                }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {saveCatalogOpen && (
+        <div
+          data-no-tab-swipe
+          role="dialog"
+          aria-modal="true"
+          aria-label="Salva in catalogo"
+          onClick={(e) => { if (e.target === e.currentTarget) closeSaveCatalog(); }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 60,
+            background: 'rgba(18, 22, 19, 0.78)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
+            paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))',
+            paddingLeft: 'max(12px, env(safe-area-inset-left, 0px))',
+            paddingRight: 'max(12px, env(safe-area-inset-right, 0px))',
+            boxSizing: 'border-box',
+          }}
+        >
+          <div
+            className="flex flex-col gap-3"
+            style={{
+              width: '100%',
+              maxWidth: '420px',
+              background: C.surface,
+              borderRadius: '16px',
+              border: `1px solid ${C.good}`,
+              padding: '16px 18px',
+              boxSizing: 'border-box',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <span style={{ fontSize: '12px', fontWeight: 600, color: C.good }}>Salva in catalogo (valori /100 g)</span>
+              <button
+                type="button"
+                onClick={closeSaveCatalog}
+                style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: 'pointer', padding: '4px' }}
+                aria-label="Chiudi"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <input
+              ref={saveCatalogNomeRef}
+              value={saveCatalogForm.nome}
+              onChange={(e) => setSaveCatalogForm((f) => ({ ...f, nome: e.target.value }))}
+              placeholder="Nome"
+              style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '8px 10px', fontSize: '13px' }}
+            />
+            <div className="flex" style={{ gap: '6px' }}>
+              {[
+                { k: 'kcal', ph: 'kcal' },
+                { k: 'proteine', ph: 'P' },
+                { k: 'carboidrati', ph: 'C' },
+                { k: 'grassi', ph: 'G' },
+              ].map((f) => (
+                <input
+                  key={f.k}
+                  value={saveCatalogForm[f.k]}
+                  onChange={(e) => setSaveCatalogForm((prev) => ({ ...prev, [f.k]: e.target.value }))}
+                  inputMode="decimal"
+                  placeholder={f.ph}
+                  style={{ flex: 1, background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '8px 6px', fontSize: '12px', fontFamily: "'IBM Plex Mono', monospace", minWidth: 0 }}
+                />
+              ))}
+            </div>
+            <label className="flex items-center gap-2" style={{ fontSize: '12px', color: C.inkMuted, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={!!saveCatalogForm.preferito}
+                onChange={(e) => setSaveCatalogForm((f) => ({ ...f, preferito: e.target.checked }))}
+              />
+              Preferito
+            </label>
+            {saveCatalogMsg && (
+              <span style={{ fontSize: '12px', color: saveCatalogMsg.includes('Salvato') ? C.good : C.alert }}>{saveCatalogMsg}</span>
+            )}
+            <button
+              type="button"
+              onClick={submitSaveCatalogFromMeal}
+              disabled={saveCatalogBusy}
+              style={{
+                alignSelf: 'flex-start',
+                background: C.good, color: C.bg, border: 'none', borderRadius: '8px',
+                padding: '8px 14px', fontSize: '13px', fontWeight: 600,
+                cursor: saveCatalogBusy ? 'default' : 'pointer', opacity: saveCatalogBusy ? 0.6 : 1,
+              }}
+            >
+              {saveCatalogBusy ? 'Salvo…' : 'Salva'}
+            </button>
+          </div>
+        </div>
+      )}
+      {toast && (
+        <div
+          role="status"
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: 'max(28px, calc(12px + env(safe-area-inset-bottom)))',
+            transform: 'translateX(-50%)',
+            zIndex: 90,
+            maxWidth: 'min(360px, calc(100vw - 32px))',
+            background: C.surfaceRaised,
+            border: `1px solid ${C.line}`,
+            color: C.ink,
+            borderRadius: '10px',
+            padding: '10px 16px',
+            fontSize: '13px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+            pointerEvents: 'none',
+            textAlign: 'center',
+          }}
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }
@@ -2425,10 +3784,15 @@ function MealRow({
   meal, editable, isEditing, confirming, active, swipeX,
   editDraft, setEditDraft, editBusy, editError, deleteBusy,
   onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onDelete,
-  onTouchStart, onTouchMove, onTouchEnd,
+  onTouchStart, onTouchMove, onTouchEnd, onCatalogStar, catalogStarFilled, catalogStarBusy,
 }) {
   const fonteLabel = String(meal.fonte || '').includes('barcode')
-    ? 'barcode' : meal.fonte === 'pwa-testo' ? 'testo' : 'voce';
+    ? 'barcode'
+    : meal.fonte === 'pwa-catalogo'
+      ? 'catalogo'
+      : meal.fonte === 'pwa-testo'
+        ? 'testo'
+        : 'voce';
   const setField = (k, v) => setEditDraft((d) => ({ ...(d || {}), [k]: v }));
   const handleRowClick = () => {
     if (!editable || swipeX !== 0) return;
@@ -2531,7 +3895,7 @@ function MealRow({
             display: 'flex', flexDirection: 'column', gap: '3px',
             padding: '8px 0', background: C.surface,
             position: 'relative',
-            paddingRight: editable && !isEditing && !confirming ? '42px' : 0,
+            paddingRight: editable && !isEditing && !confirming ? (onCatalogStar ? '78px' : '42px') : 0,
             transform: `translateX(${swipeX}px)`,
             transition: active ? 'none' : 'transform 0.18s ease',
             cursor: editable ? 'pointer' : 'default',
@@ -2550,10 +3914,7 @@ function MealRow({
             <span style={{ color: C.fat }}>{Math.round(meal.grassi)}G</span>
           </span>
           {editable && !isEditing && !confirming && (
-            <button
-              type="button"
-              aria-label="Modifica"
-              onClick={(e) => { e.stopPropagation(); onOpenEdit(meal); }}
+            <div
               style={{
                 position: 'absolute',
                 right: '6px',
@@ -2561,20 +3922,56 @@ function MealRow({
                 transform: 'translateY(-50%)',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                width: '32px',
-                height: '32px',
-                padding: 0,
-                background: C.surfaceRaised,
-                border: `1px solid ${C.line}`,
-                borderRadius: '8px',
-                color: C.inkMuted,
-                cursor: 'pointer',
-                flexShrink: 0,
+                gap: '4px',
               }}
             >
-              <Pencil size={15} />
-            </button>
+              {onCatalogStar && (
+                <button
+                  type="button"
+                  aria-label={catalogStarFilled ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}
+                  disabled={catalogStarBusy}
+                  onClick={(e) => { e.stopPropagation(); onCatalogStar(meal); }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '32px',
+                    height: '32px',
+                    padding: 0,
+                    background: C.surfaceRaised,
+                    border: `1px solid ${C.line}`,
+                    borderRadius: '8px',
+                    color: C.amber,
+                    cursor: catalogStarBusy ? 'default' : 'pointer',
+                    opacity: catalogStarBusy ? 0.55 : 1,
+                    flexShrink: 0,
+                  }}
+                >
+                  <Star size={15} fill={catalogStarFilled ? 'currentColor' : 'none'} />
+                </button>
+              )}
+              <button
+                type="button"
+                aria-label="Modifica"
+                onClick={(e) => { e.stopPropagation(); onOpenEdit(meal); }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '32px',
+                  height: '32px',
+                  padding: 0,
+                  background: C.surfaceRaised,
+                  border: `1px solid ${C.line}`,
+                  borderRadius: '8px',
+                  color: C.inkMuted,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                <Pencil size={15} />
+              </button>
+            </div>
           )}
         </div>
       </div>

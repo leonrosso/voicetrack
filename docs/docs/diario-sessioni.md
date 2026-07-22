@@ -14,6 +14,84 @@
 
 ---
 
+## 2026-07-22 — Diario: principio layout unificato oggi/storico (Cursor)
+**Fatto:** nel contenitore `Azioni + macro` del Diario, `flexGrow` non dipende più dal giorno (`dayOffset`): valore unico (`2`) sia per oggi sia per storico. Mantiene identico il principio di distribuzione verticale tra le due card nei due contesti e rimuove l’effetto “macro più piccola” sui giorni passati.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) disallineamento layout today vs storico dopo apertura card azioni su tutti i giorni. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verifica su telefono con `npm run dev` (oggi/storico: altezza blocco azioni+macro coerente; apertura Obiettivi e swipe giorno/tab invariati).
+
+## 2026-07-22 — Giorno attivo per azioni Diario (Cursor)
+**Fatto:** backend e frontend ora supportano `target_date` opzionale (`YYYY-MM-DD`) per `/log_meal`, `/scan_barcode`, `/log_catalog`: se assente resta il comportamento legacy su oggi (compat Tasker), se presente il log va nel giorno selezionato nel Diario. In PWA aggiunto latch della data (`activeLogDateRef`) per tenere coerenti i flussi multi-step (chiarimenti voce e scan con grammi) anche cambiando tab/scheda, e i success path dei log usano refresh contestuale del giorno (oggi via dashboard, storico via `dayCache/historyTick`).
+**Nuove superfici/config:** payload API PWA con `target_date`; helper backend `_resolve_target_datetime`; ref frontend `activeLogDateRef`.
+**Bug aperti/chiusi:** chiuso (codice) card azioni visibile solo oggi + registrazioni che finivano sempre su oggi quando si operava da un giorno storico. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** test su telefono con `npm run dev` per i casi: giorno storico + TESTO/VOCE/SCAN/CERCA, chiarimento voce, scan 2-step, navigazione tab durante il flusso.
+
+## 2026-07-22 — Fix rimbalzo giorno: flush transition (Cursor)
+**Fatto:** in `finishDayCommit`, `flushSync` applica prima `dayDragging=true` (transition none), poi reflow su `dayTrackRef`, poi `dayOffset` + snap `dayDrag→0`. Evita la seconda animazione ±w→0 che WebKit faceva ancora con transition accesa dopo il remap degli slot.
+**Nuove superfici/config:** `dayTrackRef`; import `flushSync`.
+**Bug aperti/chiusi:** mirato rimbalzo/secondo swipe che restava dopo il solo guard touchcancel. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su telefono con `npm run dev` (swipe giorno lungo).
+
+## 2026-07-22 — Fix rimbalzo swipe giorno (Cursor)
+**Fatto:** `onDaySwipeEnd` non azzera più `dayDrag` se c’è un commit in volo (`dayPendingCommitRef`) — evita il rimbalzo da `touchcancel`/secondo end dopo `shiftDay`. `finishDayCommit` salta `setDayDrag(0)` se già a 0. Nessun visual-preserve tipo tab (sulle slot virtuali causerebbe un secondo slide).
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) rimbalzo/secondo swipe automatico al cambio giorno. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su telefono con `npm run dev` (swipe lungo/corto, frecce, tab sotto la card).
+
+## 2026-07-22 — Fix larghezza carosello giorno (Cursor)
+**Fatto:** contenimento CSS sul carosello giorno annidato nel Diario — `overflowX: clip` + `minWidth: 0` / `maxWidth: 100%` su `dayPagerRef` e sui pannelli tab Diario/Traccia/Scan (stesso pattern anti-overflow del pager tab). Chiude il layout a doppia larghezza senza toccare swipe, Obiettivi, overlay o `--app-height`.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) pagina doppia larghezza dopo carosello giorno. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su desktop + telefono con `npm run dev` (larghezza, swipe giorno vs tab, Obiettivi, CERCA/stellina).
+
+## 2026-07-22 — Carosello giorno tipo tab (Cursor)
+**Fatto:** swipe sulla card calorie ora trascina un carosello a 3 slot (ieri|corrente|dopo) con `translateX` + settle come le tab; peeks adiacenti con calorie/macro/pasti; prefetch `/daily_summary` in `dayCache`; frecce usano la stessa animazione. Gesto solo dalla card calorie (`data-no-tab-swipe`); trend resta fisso; tab non si muovono. Direzione: dx → giorno prima, sx → giorno dopo.
+**Nuove superfici/config:** componente `DayPeek`; stato `dayCache` / `dayDragX` / `dayDragging`.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su telefono con `npm run dev` (swipe card calorie vs swipe tab sotto); deploy Vercel.
+
+## 2026-07-22 — Swipe giorno: direzione invertita (Cursor)
+**Fatto:** invertita la direzione swipe sulla card calorie — dx → giorno prima, sx → giorno dopo (max oggi).
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verificare su telefono con `npm run dev`.
+
+## 2026-07-22 — Swipe giorno sulla card calorie (Cursor)
+**Fatto:** sulla card calorie del Diario, swipe orizzontale cambia giorno (dx → giorno prima, sx → giorno dopo fino a oggi); stessi limiti delle frecce (no futuro; indietro solo con API collegata). `data-no-tab-swipe` + `touchAction: pan-y` per non rubare il carosello tab né lo scroll verticale; disabilitato con Obiettivi aperto o su bottoni.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su telefono con `npm run dev`; deploy Vercel.
+
+## 2026-07-22 — Toggle preferiti stellina Diario + CERCA (Cursor)
+**Fatto:** stellina piena se `preferito`; tap su alimento già in catalogo → `action star|unstar` + toast basso «Aggiunto/Rimosso dai preferiti»; se assente apre ancora overlay salva. CERCA: ★ toggle + cestino elimina dal catalogo (conferma). Indice `GET /catalog` per match nome/alias. Backend upsert: match anche per nome casefold (anti-duplicati senza barcode).
+**Nuove superfici/config:** toast snackbar; `catalogItems` in PWA; trash su riga CERCA catalogo.
+**Bug aperti/chiusi:** chiuso (codice) stellina sempre vuota / impossibile togliere preferito / duplicati da ri-salvataggio. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su `npm run dev`; deploy CF (match nome) + Vercel; in CERCA eliminare il duplicato «petto di pollo» di troppo.
+
+## 2026-07-22 — Overlay salva-catalogo da stellina Diario (Cursor)
+**Fatto:** tap ★ su riga pasto apre overlay `position:fixed` fuori dal carosello (come CERCA), non più mini-form inline; `focus({ preventScroll: true })`, Esc/tap fuori/X, body overflow locked, swipe tab bloccato; pager con `overflowX: clip` anti scroll-into-view.
+**Nuove superfici/config:** overlay `saveCatalogOpen` (stati meal/form invariati).
+**Bug aperti/chiusi:** chiuso (codice) layout raddoppiato in orizzontale al tap ★. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su desktop + telefono con `npm run dev`; deploy Vercel.
+
+## 2026-07-21 — Overlay CERCA: swipe-down per chiudere (Cursor)
+**Fatto:** sulla barra titolo dell'overlay CERCA, swipe verticale verso il basso (≥100 px) chiude il foglio (oltre a X / Esc / tap fuori); feedback `translateY` + fade backdrop; gesto solo dalla cima, non interferisce con lo scroll della lista.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su telefono con `npm run dev`; deploy Vercel.
+
+## 2026-07-21 — CERCA come overlay (Cursor)
+**Fatto:** CERCA non passa più dal carosello Traccia (rompeva il layout desktop via focus/scroll-into-view). Bottone CERCA apre overlay `position:fixed` sopra l'app (maxWidth 420, lista scrollabile, Esc/tap fuori/X per chiudere); `focus({ preventScroll: true })`; body overflow locked; swipe tab bloccato con overlay aperto. Traccia torna solo a voce/testo LLM.
+**Nuove superfici/config:** stato `searchOpen` (overlay); rimosso `tracciaMode`.
+**Bug aperti/chiusi:** chiuso (codice) layout sfasato su desktop al click CERCA. Invariati (ml parsing; focus camera 0.5x).
+**Prossimo passo:** verificare su desktop + telefono; deploy Vercel.
+
+## 2026-07-21 — Catalogo personale, frequenti e ricerca (Cursor)
+**Fatto:** tab Sheets `Catalogo` (auto-create) + CRUD in `sheets_client`; endpoint `/catalog` (GET/POST con action star|unstar|delete), `/search` (catalogo poi OFF text search), `/log_catalog`; upsert silenzioso da `/scan_barcode` ok; fonte `pwa-catalogo`. PWA: quarto bottone CERCA nelle azioni rapide; Traccia con toggle LIBERO/CERCA (lista frequenti, query, grammi, log); CTA «Aggiungi al catalogo» su Scan not_found; stella su riga Diario → salva in catalogo (valori /100 g).
+**Nuove superfici/config:** tab Sheets `Catalogo` (A–M); endpoint `/catalog`, `/search`, `/log_catalog`; env opzionale `CATALOG_SHEET_NAME`.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera 0.5x). Feature nuova in codice, da deployare CF + Vercel + test telefono.
+**Prossimo passo:** deploy Cloud Function + Vercel; test CERCA frequenti → grammi → riga; scan ok → compare in catalogo; not_found → aggiunta manuale; follow-up: alias vocali in `/log_meal`, “il solito” multi-item, deep link `?action=cerca`.
+
 ## 2026-07-21 — PWA: --app-height stabile cold start vs refresh (Cursor)
 **Fatto:** su Android standalone `100dvh` al refresh diventa più alto e slarga il fold. Introdotto `--app-height` da `visualViewport.height` (script early in `index.html` + `useEffect` in `App.jsx`); tutti i `minHeight: calc(100dvh - 150px)` → `calc(var(--app-height) - 150px)`; fold `paddingBottom: max(40px, env(safe-area-inset-bottom))`.
 **Nuove superfici/config:** CSS var `--app-height`.

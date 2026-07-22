@@ -22,6 +22,12 @@ from sheets_client import (
     pasto_from_hour,
     sheet_health,
     SheetConfigError,
+    list_catalog,
+    get_catalog_by_id,
+    get_catalog_by_barcode,
+    upsert_catalog_entry,
+    set_catalog_preferito,
+    delete_catalog_entry,
 )
 
 # Timezone Italia
@@ -50,7 +56,10 @@ OFF_USER_AGENT = "VoiceTrack/1.0 (uso personale)"
 
 # Valori ammessi per il campo `fonte` (§3.3 del Piano di Consolidamento).
 # "voce" e "barcode" restano per retrocompatibilita' con le righe storiche.
-_FONTI_VALIDE = {"tasker-voce", "pwa-voce", "pwa-testo", "pwa-barcode", "voce", "barcode"}
+_FONTI_VALIDE = {
+    "tasker-voce", "pwa-voce", "pwa-testo", "pwa-barcode", "pwa-catalogo",
+    "voce", "barcode",
+}
 _FONTE_DEFAULT = "tasker-voce"
 
 
@@ -88,6 +97,39 @@ def _json_response(data, status=200):
     return (json.dumps(data, ensure_ascii=False), status, headers)
 
 
+def _resolve_target_datetime(body):
+    """
+    Risolve il datetime di registrazione.
+    - Se `target_date` manca: fallback a "adesso" (compatibilita' Tasker/client legacy)
+    - Se presente: formato obbligatorio YYYY-MM-DD
+    """
+    raw = str((body or {}).get("target_date", "")).strip()
+    if not raw:
+        return datetime.now(TZ_ITALY)
+    try:
+        d = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as e:
+        raise ValueError("Campo 'target_date' non valido. Usa formato YYYY-MM-DD.") from e
+    # Mezzogiorno locale: evita effetti collaterali vicino al cambio giorno.
+    return datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=TZ_ITALY)
+
+
+def _resolve_target_or_400(body):
+    """
+    Wrapper per gli handler: ritorna (log_dt, None) oppure (None, risposta_400).
+    Tiene il ValueError della data fuori dal try principale, cosi' altri
+    ValueError non vengono scambiati per errori di data.
+    """
+    try:
+        return _resolve_target_datetime(body), None
+    except ValueError as e:
+        return None, _json_response({
+            "status": "error",
+            "message": str(e),
+            "riepilogo_vocale": "Data non valida. Usa il formato anno-mese-giorno."
+        }, 400)
+
+
 @functions_framework.http
 def voicetrack(request):
     """
@@ -102,6 +144,10 @@ def voicetrack(request):
       GET  /dashboard     → dati per la webapp
       GET  /config        → legge i target
       POST /config        → salva i target
+      GET  /catalog       → lista catalogo personale (q= filtro)
+      POST /catalog       → upsert / star / unstar / delete
+      POST /search        → ricerca catalogo + OFF
+      POST /log_catalog   → logga un prodotto da catalogo/OFF con grammi
     """
     # Preflight CORS: DEVE rispondere prima del check API key,
     # perche' il browser manda l'OPTIONS senza l'header X-API-Key.
@@ -135,6 +181,14 @@ def voicetrack(request):
         return _handle_get_config(request)
     elif path == "/config" and request.method == "POST":
         return _handle_set_config(request)
+    elif path == "/catalog" and request.method == "GET":
+        return _handle_get_catalog(request)
+    elif path == "/catalog" and request.method == "POST":
+        return _handle_post_catalog(request)
+    elif path == "/search" and request.method == "POST":
+        return _handle_search(request)
+    elif path == "/log_catalog" and request.method == "POST":
+        return _handle_log_catalog(request)
     else:
         return _json_response({"error": f"Endpoint non trovato: {request.method} {path}"}, 404)
 
@@ -163,8 +217,11 @@ def _handle_log_meal(request):
     Il campo `fonte` e' opzionale: se assente o non valido → "tasker-voce"
     (Tasker oggi non lo invia, quindi resta invariato senza toccare nulla).
     """
+    body = request.get_json(silent=True) or {}
+    log_dt, date_err = _resolve_target_or_400(body)
+    if date_err:
+        return date_err
     try:
-        body = request.get_json(silent=True) or {}
         text = body.get("text", "").strip()
         fonte = body.get("fonte", _FONTE_DEFAULT)
         if fonte not in _FONTI_VALIDE:
@@ -191,8 +248,7 @@ def _handle_log_meal(request):
 
         # 3. Se l'LLM ha estratto gli alimenti, scrivi su Google Sheets
         if llm_result.get("status") == "ok" and llm_result.get("items"):
-            now = datetime.now(TZ_ITALY)
-            append_meal_rows(llm_result["items"], now, fonte=fonte)
+            append_meal_rows(llm_result["items"], log_dt, fonte=fonte)
 
         return _json_response(llm_result)
 
@@ -296,8 +352,11 @@ def _handle_scan_barcode(request):
     Body JSON: {"barcode": "8001120000000", "grammi": 150, "fonte": "pwa-barcode"}
     `grammi` opzionale: se assente → needs_clarification con scheda prodotto.
     """
+    body = request.get_json(silent=True) or {}
+    log_dt, date_err = _resolve_target_or_400(body)
+    if date_err:
+        return date_err
     try:
-        body = request.get_json(silent=True) or {}
         barcode = str(body.get("barcode", "")).strip()
         fonte = body.get("fonte", "pwa-barcode")
         if fonte not in _FONTI_VALIDE:
@@ -370,8 +429,21 @@ def _handle_scan_barcode(request):
             "grassi": round(per100["grassi"] * fattore, 1),
         }
 
-        now = datetime.now(TZ_ITALY)
-        append_meal_rows([item], now, fonte=fonte)
+        append_meal_rows([item], log_dt, fonte=fonte)
+
+        # Upsert silenzioso nel catalogo personale (barcode + nutrienti).
+        try:
+            upsert_catalog_entry(
+                nome=nome,
+                per_100g=per100,
+                barcode=barcode,
+                off_code=barcode,
+                fonte="barcode",
+                bump_usage=True,
+                now_ts=log_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except Exception as e:
+            logging.warning(f"[scan_barcode] upsert catalogo fallito: {e}")
 
         riepilogo = (
             f"Registrato: {nome}, {round(grammi)} grammi. "
@@ -709,3 +781,353 @@ def _handle_set_config(request):
     except Exception as e:
         logging.error(f"[config:set] errore: {e}", exc_info=True)
         return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
+
+
+# ---------------------------------------------------------------------------
+# Catalogo personale + ricerca + log da catalogo
+# ---------------------------------------------------------------------------
+
+def _catalog_public(entry: dict) -> dict:
+    """Shape JSON uniforme per catalogo / search results."""
+    return {
+        "id": entry.get("id", ""),
+        "nome": entry.get("nome", ""),
+        "alias": entry.get("alias", ""),
+        "barcode": entry.get("barcode", ""),
+        "per_100g": entry.get("per_100g") or {},
+        "fonte": entry.get("fonte", "manuale"),
+        "off_code": entry.get("off_code", ""),
+        "volte": entry.get("volte", 0),
+        "ultimo_uso": entry.get("ultimo_uso", ""),
+        "preferito": bool(entry.get("preferito")),
+        "origine": "catalogo",
+    }
+
+
+def _handle_get_catalog(request):
+    """GET /catalog?q= — lista ordinata, filtro opzionale."""
+    try:
+        q = request.args.get("q", "")
+        items = [_catalog_public(e) for e in list_catalog(q)]
+        return _json_response({"status": "ok", "items": items})
+    except SheetConfigError as e:
+        logging.error(f"[catalog:get] foglio: {e}")
+        return _json_response({"status": "error", "message": str(e)}, 500)
+    except Exception as e:
+        logging.error(f"[catalog:get] errore: {e}", exc_info=True)
+        return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
+
+
+def _handle_post_catalog(request):
+    """
+    POST /catalog
+    - upsert (default): { nome, per_100g, barcode?, alias?, fonte?, preferito?, id? }
+    - action=star|unstar|delete: { id, action }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        action = str(body.get("action", "")).strip().lower()
+
+        if action in ("star", "unstar", "delete"):
+            catalog_id = str(body.get("id", "")).strip()
+            if not catalog_id:
+                return _json_response({
+                    "status": "error",
+                    "message": "Campo 'id' obbligatorio per action star/unstar/delete.",
+                }, 400)
+            if action == "delete":
+                ok = delete_catalog_entry(catalog_id)
+                if not ok:
+                    return _json_response({
+                        "status": "not_found",
+                        "id": catalog_id,
+                        "message": f"Nessun prodotto catalogo con id {catalog_id}.",
+                    }, 404)
+                return _json_response({"status": "ok", "id": catalog_id, "deleted": True})
+
+            entry = set_catalog_preferito(catalog_id, preferito=(action == "star"))
+            if not entry:
+                return _json_response({
+                    "status": "not_found",
+                    "id": catalog_id,
+                    "message": f"Nessun prodotto catalogo con id {catalog_id}.",
+                }, 404)
+            return _json_response({"status": "ok", "item": _catalog_public(entry)})
+
+        # Upsert
+        nome = str(body.get("nome", "")).strip()
+        per_100g = body.get("per_100g") or {}
+        if not nome:
+            return _json_response({
+                "status": "error",
+                "message": "Campo 'nome' obbligatorio.",
+            }, 400)
+        if not isinstance(per_100g, dict) or "kcal" not in per_100g:
+            # Accetta anche kcal/P/C/G a primo livello
+            if any(k in body for k in ("kcal", "proteine", "carboidrati", "grassi")):
+                per_100g = {
+                    "kcal": body.get("kcal", 0),
+                    "proteine": body.get("proteine", 0),
+                    "carboidrati": body.get("carboidrati", 0),
+                    "grassi": body.get("grassi", 0),
+                }
+            else:
+                return _json_response({
+                    "status": "error",
+                    "message": "Serve per_100g con almeno kcal (o kcal a primo livello).",
+                }, 400)
+
+        preferito = body.get("preferito")
+        if preferito is not None:
+            preferito = bool(preferito)
+
+        entry = upsert_catalog_entry(
+            nome=nome,
+            per_100g=per_100g,
+            barcode=str(body.get("barcode", "")).strip(),
+            alias=str(body.get("alias", "")).strip(),
+            fonte=str(body.get("fonte", "manuale")).strip() or "manuale",
+            off_code=str(body.get("off_code", body.get("barcode", ""))).strip(),
+            preferito=preferito,
+            catalog_id=str(body.get("id", "")).strip(),
+        )
+        return _json_response({"status": "ok", "item": _catalog_public(entry)})
+
+    except ValueError as e:
+        return _json_response({"status": "error", "message": str(e)}, 400)
+    except SheetConfigError as e:
+        logging.error(f"[catalog:post] foglio: {e}")
+        return _json_response({"status": "error", "message": str(e)}, 500)
+    except Exception as e:
+        logging.error(f"[catalog:post] errore: {e}", exc_info=True)
+        return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
+
+
+def _search_off_text(q: str, page_size: int = 8) -> list[dict]:
+    """
+    Ricerca testuale Open Food Facts. Ritorna lista nello shape search result
+    (origine=off). Fallisce silenziosamente → lista vuota.
+    """
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+
+    needle = (q or "").strip()
+    if not needle or len(needle) < 2:
+        return []
+
+    params = urllib.parse.urlencode({
+        "search_terms": needle,
+        "search_simple": 1,
+        "action": "process",
+        "json": 1,
+        "page_size": page_size,
+        "fields": "code,product_name,product_name_it,brands,nutriments",
+    })
+    url = f"https://world.openfoodfacts.org/cgi/search.pl?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": OFF_USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=OFF_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logging.warning(f"[search] OFF text search fallita: {e}")
+        return []
+
+    out = []
+    for product in data.get("products") or []:
+        code = str(product.get("code") or "").strip()
+        per100 = _off_per_100g(product)
+        if not code or per100 is None:
+            continue
+        nome = _off_display_name(product, code)
+        out.append({
+            "id": "",
+            "nome": nome,
+            "alias": "",
+            "barcode": code,
+            "per_100g": per100,
+            "fonte": "off",
+            "off_code": code,
+            "volte": 0,
+            "ultimo_uso": "",
+            "preferito": False,
+            "origine": "off",
+        })
+    return out
+
+
+def _handle_search(request):
+    """
+    POST /search  body: { "q": "yogurt" }
+    q vuoto → top frequenti/preferiti dal catalogo.
+    Altrimenti match catalogo; se < 3 hit → aggiunge OFF text search.
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        q = str(body.get("q", "")).strip()
+
+        catalog_hits = [_catalog_public(e) for e in list_catalog(q)]
+        results = list(catalog_hits)
+
+        if q and len(catalog_hits) < 3:
+            # Evita duplicati barcode gia' in catalogo
+            seen = {
+                (r.get("barcode") or r.get("off_code") or "").strip()
+                for r in catalog_hits
+                if (r.get("barcode") or r.get("off_code"))
+            }
+            for off_item in _search_off_text(q):
+                code = (off_item.get("barcode") or "").strip()
+                if code and code in seen:
+                    continue
+                results.append(off_item)
+                if code:
+                    seen.add(code)
+
+        return _json_response({
+            "status": "ok",
+            "q": q,
+            "items": results,
+        })
+
+    except SheetConfigError as e:
+        logging.error(f"[search] foglio: {e}")
+        return _json_response({"status": "error", "message": str(e)}, 500)
+    except Exception as e:
+        logging.error(f"[search] errore: {e}", exc_info=True)
+        return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
+
+
+def _handle_log_catalog(request):
+    """
+    POST /log_catalog
+    Body: { catalog_id? | barcode? | off_code?, grammi, fonte? }
+    Risolve scheda (catalogo o OFF), scala, scrive pasto, bump usage / upsert.
+    """
+    body = request.get_json(silent=True) or {}
+    log_dt, date_err = _resolve_target_or_400(body)
+    if date_err:
+        return date_err
+    try:
+        catalog_id = str(body.get("catalog_id", body.get("id", ""))).strip()
+        barcode = str(body.get("barcode", "")).strip()
+        off_code = str(body.get("off_code", "")).strip() or barcode
+        fonte = body.get("fonte", "pwa-catalogo")
+        if fonte not in _FONTI_VALIDE:
+            fonte = "pwa-catalogo"
+
+        try:
+            grammi = float(body.get("grammi"))
+        except (TypeError, ValueError):
+            grammi = None
+        if grammi is None or grammi <= 0:
+            return _json_response({
+                "status": "error",
+                "message": "Campo 'grammi' obbligatorio e > 0.",
+                "riepilogo_vocale": "Indica i grammi.",
+            }, 400)
+
+        entry = None
+        if catalog_id:
+            entry = get_catalog_by_id(catalog_id)
+        if entry is None and barcode:
+            entry = get_catalog_by_barcode(barcode)
+        if entry is None and off_code and off_code != barcode:
+            entry = get_catalog_by_barcode(off_code)
+
+        nome = None
+        per100 = None
+        resolved_barcode = barcode or off_code
+
+        if entry:
+            nome = entry["nome"]
+            per100 = entry["per_100g"]
+            resolved_barcode = entry.get("barcode") or entry.get("off_code") or resolved_barcode
+            catalog_id = entry["id"]
+        else:
+            # Fetch OFF se abbiamo un codice
+            code = resolved_barcode
+            if not code or not code.isdigit():
+                return _json_response({
+                    "status": "error",
+                    "message": "Prodotto non trovato nel catalogo e nessun barcode OFF valido.",
+                    "riepilogo_vocale": "Prodotto non trovato.",
+                }, 404)
+            product, err = _fetch_off_product(code)
+            if err:
+                return _json_response({
+                    "status": "error",
+                    "message": err,
+                    "riepilogo_vocale": err,
+                }, 502)
+            if product is None:
+                return _json_response({
+                    "status": "not_found",
+                    "message": f"Prodotto {code} non trovato.",
+                    "riepilogo_vocale": "Prodotto non trovato.",
+                }, 404)
+            per100 = _off_per_100g(product)
+            nome = _off_display_name(product, code)
+            if per100 is None:
+                return _json_response({
+                    "status": "error",
+                    "message": f"'{nome}' senza valori nutrizionali utilizzabili.",
+                    "riepilogo_vocale": "Mancano i valori nutrizionali.",
+                }, 422)
+            resolved_barcode = code
+
+        grammi = round(grammi, 1)
+        fattore = grammi / 100.0
+        item = {
+            "alimento": nome,
+            "grammi": grammi,
+            "kcal": round(per100["kcal"] * fattore, 1),
+            "proteine": round(per100["proteine"] * fattore, 1),
+            "carboidrati": round(per100["carboidrati"] * fattore, 1),
+            "grassi": round(per100["grassi"] * fattore, 1),
+        }
+
+        now_ts = log_dt.strftime("%Y-%m-%d %H:%M:%S")
+        append_meal_rows([item], log_dt, fonte=fonte)
+
+        # Upsert / bump catalogo
+        try:
+            upsert_catalog_entry(
+                catalog_id=catalog_id or "",
+                nome=nome,
+                per_100g=per100,
+                barcode=resolved_barcode or "",
+                off_code=resolved_barcode or "",
+                fonte=entry.get("fonte", "off") if entry else "off",
+                bump_usage=True,
+                now_ts=now_ts,
+            )
+        except Exception as e:
+            logging.warning(f"[log_catalog] upsert catalogo fallito: {e}")
+
+        riepilogo = (
+            f"Registrato: {nome}, {round(grammi)} grammi. "
+            f"{round(item['kcal'])} calorie, {round(item['proteine'])} grammi di proteine."
+        )
+        return _json_response({
+            "status": "ok",
+            "items": [item],
+            "totale": {k: item[k] for k in ("kcal", "proteine", "carboidrati", "grassi")},
+            "riepilogo_vocale": riepilogo,
+        })
+
+    except SheetConfigError as e:
+        logging.error(f"[log_catalog] foglio: {e}")
+        return _json_response({
+            "status": "error",
+            "message": str(e),
+            "riepilogo_vocale": f"Errore di configurazione del foglio: {str(e)}",
+        }, 500)
+    except Exception as e:
+        logging.error(f"[log_catalog] errore: {e}", exc_info=True)
+        return _json_response({
+            "status": "error",
+            "message": f"Errore interno: {str(e)}",
+            "riepilogo_vocale": "Si è verificato un errore. Riprova.",
+        }, 500)
+
