@@ -1007,11 +1007,41 @@ def _handle_search(request):
         return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
 
 
+def _per100_from_body(body):
+    """
+    Valida i valori nutrizionali per 100g eventualmente gia' inclusi nel body
+    (es. arrivano dalla risposta di /search appena fatta): se validi, evitano
+    una seconda chiamata di rete a OFF dentro _handle_log_catalog.
+    Ritorna None se mancanti/non validi.
+    """
+    raw = body.get("per_100g")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        kcal = float(raw.get("kcal"))
+    except (TypeError, ValueError):
+        return None
+
+    def numf(key):
+        try:
+            return round(float(raw.get(key)), 1)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "kcal": round(kcal, 1),
+        "proteine": numf("proteine"),
+        "carboidrati": numf("carboidrati"),
+        "grassi": numf("grassi"),
+    }
+
+
 def _handle_log_catalog(request):
     """
     POST /log_catalog
-    Body: { catalog_id? | barcode? | off_code?, grammi, fonte? }
-    Risolve scheda (catalogo o OFF), scala, scrive pasto, bump usage / upsert.
+    Body: { catalog_id? | barcode? | off_code?, grammi, fonte?, nome?, per_100g? }
+    Risolve scheda (catalogo, valori gia' forniti dal client, o fetch OFF),
+    scala, scrive pasto, bump usage / upsert.
     """
     body = request.get_json(silent=True) or {}
     log_dt, date_err = _resolve_target_or_400(body)
@@ -1054,36 +1084,48 @@ def _handle_log_catalog(request):
             resolved_barcode = entry.get("barcode") or entry.get("off_code") or resolved_barcode
             catalog_id = entry["id"]
         else:
-            # Fetch OFF se abbiamo un codice
             code = resolved_barcode
-            if not code or not code.isdigit():
-                return _json_response({
-                    "status": "error",
-                    "message": "Prodotto non trovato nel catalogo e nessun barcode OFF valido.",
-                    "riepilogo_vocale": "Prodotto non trovato.",
-                }, 404)
-            product, err = _fetch_off_product(code)
-            if err:
-                return _json_response({
-                    "status": "error",
-                    "message": err,
-                    "riepilogo_vocale": err,
-                }, 502)
-            if product is None:
-                return _json_response({
-                    "status": "not_found",
-                    "message": f"Prodotto {code} non trovato.",
-                    "riepilogo_vocale": "Prodotto non trovato.",
-                }, 404)
-            per100 = _off_per_100g(product)
-            nome = _off_display_name(product, code)
-            if per100 is None:
-                return _json_response({
-                    "status": "error",
-                    "message": f"'{nome}' senza valori nutrizionali utilizzabili.",
-                    "riepilogo_vocale": "Mancano i valori nutrizionali.",
-                }, 422)
-            resolved_barcode = code
+            client_per100 = _per100_from_body(body)
+            if client_per100:
+                # Valori gia' forniti dal client (es. arrivano dalla risposta
+                # di /search appena fatta): evita una seconda chiamata di
+                # rete a OFF, che altrove ha causato "failed to fetch" per
+                # timeout lato client con OFF lento / cold start.
+                per100 = client_per100
+                fallback_nome = f"Prodotto {code}" if code else "Prodotto"
+                nome = str(body.get("nome", "")).strip() or fallback_nome
+                resolved_barcode = code
+            else:
+                # Nessun valore dal client: fetch OFF (fallback, es. client
+                # non aggiornato o chiamata diretta senza passare da /search).
+                if not code or not code.isdigit():
+                    return _json_response({
+                        "status": "error",
+                        "message": "Prodotto non trovato nel catalogo e nessun barcode OFF valido.",
+                        "riepilogo_vocale": "Prodotto non trovato.",
+                    }, 404)
+                product, err = _fetch_off_product(code)
+                if err:
+                    return _json_response({
+                        "status": "error",
+                        "message": err,
+                        "riepilogo_vocale": err,
+                    }, 502)
+                if product is None:
+                    return _json_response({
+                        "status": "not_found",
+                        "message": f"Prodotto {code} non trovato.",
+                        "riepilogo_vocale": "Prodotto non trovato.",
+                    }, 404)
+                per100 = _off_per_100g(product)
+                nome = _off_display_name(product, code)
+                if per100 is None:
+                    return _json_response({
+                        "status": "error",
+                        "message": f"'{nome}' senza valori nutrizionali utilizzabili.",
+                        "riepilogo_vocale": "Mancano i valori nutrizionali.",
+                    }, 422)
+                resolved_barcode = code
 
         grammi = round(grammi, 1)
         fattore = grammi / 100.0

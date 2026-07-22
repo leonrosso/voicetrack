@@ -1221,6 +1221,13 @@ export default function VoiceTrackDashboard() {
       if (searchProduct.id) body.catalog_id = searchProduct.id;
       if (searchProduct.barcode) body.barcode = searchProduct.barcode;
       if (searchProduct.off_code) body.off_code = searchProduct.off_code;
+      // Prodotto non ancora in catalogo (arriva da OFF): i valori li abbiamo
+      // gia' dalla ricerca appena fatta, evitiamo un secondo fetch OFF lato
+      // backend (causa nota di "failed to fetch" con OFF lento / cold start).
+      if (!searchProduct.id && searchProduct.per_100g) {
+        body.nome = searchProduct.nome;
+        body.per_100g = searchProduct.per_100g;
+      }
 
       const res = await fetch(`${base}/log_catalog`, {
         method: 'POST',
