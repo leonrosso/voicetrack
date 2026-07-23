@@ -6,6 +6,8 @@ piu' la tab di configurazione con i target giornalieri.
 
 import json
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, date, timedelta
 from google.oauth2 import service_account
@@ -25,15 +27,18 @@ CATALOG_SHEET_NAME = os.environ.get("CATALOG_SHEET_NAME", "Catalogo")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Colonne del foglio pasti (ordine fisso)
-# A: timestamp | B: alimento | C: grammi | D: kcal | E: proteine | F: carboidrati | G: grassi | H: fonte | I: note | J: id
-# NB (Deploy 5 §5.1): `id` e' aggiunto IN CODA di proposito. Cosi' nessuna
-# colonna esistente si sposta e le righe storiche (che arrivano con lunghezza
-# < 10 dall'API) vengono lette con id = "" senza rompere nulla.
-COLUMNS = ["timestamp", "alimento", "grammi", "kcal", "proteine", "carboidrati", "grassi", "fonte", "note", "id"]
+# A: timestamp | B: alimento | C: grammi | D: kcal | E: proteine | F: carboidrati
+# | G: grassi | H: fonte | I: note | J: id | K: data_dichiarata
+# NB: `id` e `data_dichiarata` sono IN CODA di proposito. Le righe storiche
+# (lunghezza < 10 o senza K) restano leggibili: id="" e data_dichiarata=timestamp.
+COLUMNS = [
+    "timestamp", "alimento", "grammi", "kcal", "proteine", "carboidrati",
+    "grassi", "fonte", "note", "id", "data_dichiarata",
+]
 
-# Range completo dello schema pasti (A..J). Usato ovunque si legga/scriva il
+# Range completo dello schema pasti (A..K). Usato ovunque si legga/scriva il
 # foglio: aggiornare qui se un giorno si aggiungono colonne.
-_SHEET_RANGE = "A:J"
+_SHEET_RANGE = "A:K"
 
 # Target di default usati quando la tab Config viene creata la prima volta.
 DEFAULT_TARGETS = {"kcal": 2200, "proteine": 165, "carboidrati": 220, "grassi": 70}
@@ -48,6 +53,42 @@ MONTH_IT = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott"
 # Cache dei titoli delle tab esistenti, valida per la durata dell'istanza "calda"
 # della Cloud Function (si azzera ad ogni nuovo deploy o cold start).
 _sheet_titles_cache = None
+
+# Cache pasti in-memory (istanza CF): TTL allineato al poll PWA; single-flight
+# cosi' 3× /daily_summary paralleli condividono una sola values().get.
+_MEALS_CACHE_TTL_S = 20
+_meals_cache_rows = None  # list[dict] | None
+_meals_cache_at = 0.0
+_meals_cache_lock = threading.Lock()
+_meals_inflight = None  # threading.Event set when fetch done; result in _meals_inflight_result
+_meals_inflight_result = None
+_meals_inflight_error = None
+
+
+def _invalidate_meals_cache():
+    """Azzera la cache pasti dopo append/update/delete."""
+    global _meals_cache_rows, _meals_cache_at
+    with _meals_cache_lock:
+        _meals_cache_rows = None
+        _meals_cache_at = 0.0
+
+
+# Cache target Config (istanza CF): stesso TTL/single-flight dei pasti.
+_CONFIG_CACHE_TTL_S = 20
+_config_cache_targets = None  # dict | None
+_config_cache_at = 0.0
+_config_cache_lock = threading.Lock()
+_config_inflight = None
+_config_inflight_result = None
+_config_inflight_error = None
+
+
+def _invalidate_config_cache():
+    """Azzera la cache target dopo set_config_targets."""
+    global _config_cache_targets, _config_cache_at
+    with _config_cache_lock:
+        _config_cache_targets = None
+        _config_cache_at = 0.0
 
 
 class SheetConfigError(Exception):
@@ -179,20 +220,31 @@ def _to_float(value) -> float:
 # ---------------------------------------------------------------------------
 # Scrittura pasti
 # ---------------------------------------------------------------------------
-def append_meal_rows(items: list[dict], timestamp: datetime, fonte: str = "tasker-voce"):
+def append_meal_rows(
+    items: list[dict],
+    recorded_at: datetime,
+    declared_at: datetime | None = None,
+    fonte: str = "tasker-voce",
+):
     """
     Appende una o piu' righe al foglio pasti.
 
     Args:
         items: Lista di dict con alimento, grammi, kcal, proteine, carboidrati, grassi
-        timestamp: Datetime del pasto
+        recorded_at: Quando il pasto e' stato registrato (colonna timestamp)
+        declared_at: Giorno del pasto (colonna data_dichiarata). Se None, coincide
+                     con recorded_at.
         fonte: Origine del dato: "tasker-voce" | "pwa-voce" | "pwa-barcode"
                ("voce"/"barcode" restano validi per retrocompatibilita')
     """
     sheets = _get_sheets_service()
     _verify_sheet_exists(sheets)
 
-    ts_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    if declared_at is None:
+        declared_at = recorded_at
+
+    ts_str = recorded_at.strftime("%Y-%m-%d %H:%M:%S")
+    declared_str = declared_at.strftime("%Y-%m-%d %H:%M:%S")
 
     rows = []
     for item in items:
@@ -207,6 +259,7 @@ def append_meal_rows(items: list[dict], timestamp: datetime, fonte: str = "taske
             fonte,
             "",                 # note
             str(uuid.uuid4()),  # id: UUID stabile per tap-to-edit / swipe-to-delete
+            declared_str,       # data_dichiarata (giorno del pasto)
         ])
 
     sheets.values().append(
@@ -216,6 +269,7 @@ def append_meal_rows(items: list[dict], timestamp: datetime, fonte: str = "taske
         insertDataOption="INSERT_ROWS",
         body={"values": rows}
     ).execute()
+    _invalidate_meals_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -225,17 +279,21 @@ def _parse_row(row: list) -> dict | None:
     """Converte una riga grezza del foglio in un dict, o None se non valida."""
     if not row or len(row) < 7:
         return None
-    ts = row[0]
+    ts = str(row[0]).strip()
     if len(ts) < 16:
         return None
-    time_str = ts[11:16]  # HH:MM
+    # Giorno pasto: data_dichiarata (K) se presente, altrimenti timestamp (legacy).
+    declared_raw = str(row[10]).strip() if len(row) > 10 else ""
+    meal_ts = declared_raw if len(declared_raw) >= 16 else ts
+    time_str = meal_ts[11:16]  # HH:MM
     try:
-        hour = int(ts[11:13])
+        hour = int(meal_ts[11:13])
     except (ValueError, IndexError):
         hour = 12
     return {
         "timestamp": ts,
-        "date": ts[:10],
+        "data_dichiarata": meal_ts,
+        "date": meal_ts[:10],
         "time": time_str,
         "pasto": pasto_from_hour(hour),
         "alimento": row[1] if len(row) > 1 else "",
@@ -251,8 +309,8 @@ def _parse_row(row: list) -> dict | None:
     }
 
 
-def get_all_meal_rows() -> list[dict]:
-    """Legge e parsa TUTTE le righe del foglio pasti (una sola chiamata API)."""
+def _fetch_all_meal_rows_uncached() -> list[dict]:
+    """Lettura Sheets completa + parse (nessuna cache)."""
     sheets = _get_sheets_service()
     _verify_sheet_exists(sheets)
 
@@ -267,6 +325,63 @@ def get_all_meal_rows() -> list[dict]:
         if parsed:
             meals.append(parsed)
     return meals
+
+
+def get_all_meal_rows() -> list[dict]:
+    """
+    Legge e parsa TUTTE le righe del foglio pasti.
+    Cache TTL 20s + single-flight: N request parallele → una sola values().get.
+    """
+    global _meals_cache_rows, _meals_cache_at
+    global _meals_inflight, _meals_inflight_result, _meals_inflight_error
+
+    now = time.monotonic()
+    with _meals_cache_lock:
+        if (
+            _meals_cache_rows is not None
+            and (now - _meals_cache_at) < _MEALS_CACHE_TTL_S
+        ):
+            return list(_meals_cache_rows)
+
+        if _meals_inflight is not None:
+            waiter = _meals_inflight
+            is_leader = False
+        else:
+            waiter = threading.Event()
+            _meals_inflight = waiter
+            _meals_inflight_result = None
+            _meals_inflight_error = None
+            is_leader = True
+
+    if not is_leader:
+        waiter.wait(timeout=55)
+        with _meals_cache_lock:
+            if _meals_inflight_error is not None:
+                raise _meals_inflight_error
+            if _meals_inflight_result is not None:
+                return list(_meals_inflight_result)
+            # Timeout / race: ricadi su fetch diretto (raro)
+        return _fetch_all_meal_rows_uncached()
+
+    try:
+        meals = _fetch_all_meal_rows_uncached()
+        with _meals_cache_lock:
+            _meals_cache_rows = meals
+            _meals_cache_at = time.monotonic()
+            _meals_inflight_result = meals
+            _meals_inflight_error = None
+        return list(meals)
+    except Exception as e:
+        with _meals_cache_lock:
+            _meals_inflight_error = e
+            _meals_inflight_result = None
+        raise
+    finally:
+        with _meals_cache_lock:
+            done = _meals_inflight
+            _meals_inflight = None
+        if done is not None:
+            done.set()
 
 
 def get_today_rows(target_date: date) -> list[dict]:
@@ -307,7 +422,7 @@ _EDITABLE_NUMERIC = {"grammi", "kcal", "proteine", "carboidrati", "grassi"}
 
 
 def _read_all_raw(sheets):
-    """Legge tutte le righe grezze del foglio pasti (A:J), senza parsing."""
+    """Legge tutte le righe grezze del foglio pasti (A:K), senza parsing."""
     result = sheets.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!{_SHEET_RANGE}"
@@ -378,6 +493,7 @@ def update_meal_row(meal_id: str, fields: dict) -> bool:
         valueInputOption="USER_ENTERED",
         body={"values": [new_row]},
     ).execute()
+    _invalidate_meals_cache()
     return True
 
 
@@ -408,6 +524,7 @@ def delete_meal_row(meal_id: str) -> bool:
             }
         }]}
     ).execute()
+    _invalidate_meals_cache()
     return True
 
 
@@ -425,11 +542,8 @@ def _write_targets(sheets, targets: dict):
     ).execute()
 
 
-def get_config_targets() -> dict:
-    """
-    Legge i target dalla tab Config. Se la tab non esiste, la crea con i
-    default e li ritorna. Chiavi mancanti vengono completate coi default.
-    """
+def _fetch_config_targets_uncached() -> dict:
+    """Lettura tab Config + parse (nessuna cache)."""
     sheets = _get_sheets_service()
     _ensure_config_sheet(sheets)
 
@@ -448,6 +562,63 @@ def get_config_targets() -> dict:
     return {k: found.get(k, DEFAULT_TARGETS[k]) for k in _TARGET_KEYS}
 
 
+def get_config_targets() -> dict:
+    """
+    Legge i target dalla tab Config. Se la tab non esiste, la crea con i
+    default e li ritorna. Chiavi mancanti vengono completate coi default.
+    Cache TTL 20s + single-flight (stesso pattern dei pasti).
+    """
+    global _config_cache_targets, _config_cache_at
+    global _config_inflight, _config_inflight_result, _config_inflight_error
+
+    now = time.monotonic()
+    with _config_cache_lock:
+        if (
+            _config_cache_targets is not None
+            and (now - _config_cache_at) < _CONFIG_CACHE_TTL_S
+        ):
+            return dict(_config_cache_targets)
+
+        if _config_inflight is not None:
+            waiter = _config_inflight
+            is_leader = False
+        else:
+            waiter = threading.Event()
+            _config_inflight = waiter
+            _config_inflight_result = None
+            _config_inflight_error = None
+            is_leader = True
+
+    if not is_leader:
+        waiter.wait(timeout=55)
+        with _config_cache_lock:
+            if _config_inflight_error is not None:
+                raise _config_inflight_error
+            if _config_inflight_result is not None:
+                return dict(_config_inflight_result)
+        return _fetch_config_targets_uncached()
+
+    try:
+        targets = _fetch_config_targets_uncached()
+        with _config_cache_lock:
+            _config_cache_targets = targets
+            _config_cache_at = time.monotonic()
+            _config_inflight_result = targets
+            _config_inflight_error = None
+        return dict(targets)
+    except Exception as e:
+        with _config_cache_lock:
+            _config_inflight_error = e
+            _config_inflight_result = None
+        raise
+    finally:
+        with _config_cache_lock:
+            done = _config_inflight
+            _config_inflight = None
+        if done is not None:
+            done.set()
+
+
 def set_config_targets(targets: dict) -> dict:
     """
     Salva i target nella tab Config (creandola se manca). Ritorna i target
@@ -463,6 +634,7 @@ def set_config_targets(targets: dict) -> dict:
             clean[k] = DEFAULT_TARGETS[k]
 
     _write_targets(sheets, clean)
+    _invalidate_config_cache()
     return clean
 
 

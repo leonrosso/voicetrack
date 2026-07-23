@@ -22,7 +22,11 @@ const C = {
   bg: '#121613',
   surface: '#1A211D',
   surfaceRaised: '#212A25',
+  surfacePast: '#211C18',   // marrone caldo: schede Diario nei giorni passati
+  surfaceFuture: '#1A242C', // slate freddo: schede Diario nei giorni futuri
   line: '#2B352F',
+  linePast: '#3A322C',
+  lineFuture: '#2A3540',
   ink: '#EFEDE4',
   inkMuted: '#8C978F',
   inkFaint: '#5B655E',
@@ -371,6 +375,88 @@ const dateForOffset = (offset) => {
   return d;
 };
 
+// Cache giorni ≠ oggi: persistenza localStorage (come vt-cache) + SWR in App.
+const DAY_CACHE_KEY = 'vt-day-cache';
+const DAY_CACHE_STALE_MS = 2 * 60 * 1000; // rifetch background se più vecchio di 2 min
+const DAY_CACHE_MAX_DAYS = 40;
+
+function prunePersistedDays(days) {
+  const entries = Object.entries(days || {});
+  if (entries.length <= DAY_CACHE_MAX_DAYS) return days;
+  entries.sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0));
+  return Object.fromEntries(entries.slice(0, DAY_CACHE_MAX_DAYS));
+}
+
+async function loadPersistedDayCache() {
+  try {
+    const raw = await storage.get(DAY_CACHE_KEY);
+    if (!raw?.value) return {};
+    const parsed = JSON.parse(raw.value);
+    if (parsed?.version !== 1 || !parsed.days) return {};
+    const out = {};
+    for (const [str, entry] of Object.entries(parsed.days)) {
+      if (Array.isArray(entry?.meals)) {
+        out[str] = { meals: entry.meals, loading: false, error: '', at: entry.at || 0 };
+      }
+    }
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
+async function persistDayCacheEntry(str, meals) {
+  try {
+    const raw = await storage.get(DAY_CACHE_KEY);
+    let days = {};
+    if (raw?.value) {
+      const parsed = JSON.parse(raw.value);
+      if (parsed?.version === 1 && parsed.days) days = { ...parsed.days };
+    }
+    days[str] = { meals, at: Date.now() };
+    await storage.set(DAY_CACHE_KEY, JSON.stringify({ version: 1, days: prunePersistedDays(days) }));
+  } catch (e) {}
+}
+
+async function removePersistedDay(str) {
+  try {
+    const raw = await storage.get(DAY_CACHE_KEY);
+    if (!raw?.value) return;
+    const parsed = JSON.parse(raw.value);
+    if (parsed?.version !== 1 || !parsed.days || !(str in parsed.days)) return;
+    const days = { ...parsed.days };
+    delete days[str];
+    await storage.set(DAY_CACHE_KEY, JSON.stringify({ version: 1, days }));
+  } catch (e) {}
+}
+
+const daySurface = (offset) => {
+  if (offset > 0) return C.surfaceFuture;
+  if (offset < 0) return C.surfacePast;
+  return C.surface;
+};
+const dayLine = (offset) => {
+  if (offset > 0) return C.lineFuture;
+  if (offset < 0) return C.linePast;
+  return C.line;
+};
+
+/** Titolo scheda Diario: Ieri / Oggi / Domani, altrimenti data completa. */
+const diaryDayTitle = (offset, date) => {
+  if (offset === 0) return dayLabel();
+  if (offset === -1) return 'Ieri';
+  if (offset === 1) return 'Domani';
+  return dayLabel(date || dateForOffset(offset));
+};
+
+const diaryMealsHeading = (offset, date) => {
+  if (offset === 0) return 'Pasti di oggi';
+  if (offset === -1) return 'Pasti di ieri';
+  if (offset === 1) return 'Pasti di domani';
+  const d = date || dateForOffset(offset);
+  return `Pasti del ${d.toLocaleDateString('it-IT', { day: 'numeric', month: 'long' })}`;
+};
+
 // Anteprima giorno adiacente nel carosello Diario (sola lettura, niente interazioni).
 function DayPeek({ offset, meals, loading, error, target }) {
   const date = dateForOffset(offset);
@@ -384,12 +470,14 @@ function DayPeek({ offset, meals, loading, error, target }) {
     { name: 'Carboidrati', grams: totals.carboidrati, cal: totals.carboidrati * 4, color: C.carbs },
     { name: 'Grassi', grams: totals.grassi, cal: totals.grassi * 9, color: C.fat },
   ];
+  const surf = daySurface(offset);
+  const line = dayLine(offset);
   return (
     <div className="flex flex-col gap-4" style={{ pointerEvents: 'none', userSelect: 'none' }} aria-hidden>
       <div
         style={{
-          background: C.surface,
-          border: `1px solid ${C.line}`,
+          background: surf,
+          border: `1px solid ${line}`,
           borderRadius: '14px',
           padding: '22px 22px 34px',
           display: 'flex',
@@ -400,7 +488,7 @@ function DayPeek({ offset, meals, loading, error, target }) {
         }}
       >
         <div style={{ textAlign: 'center', fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink }}>
-          {offset === 0 ? dayLabel() : dayLabel(date)}
+          {diaryDayTitle(offset, date)}
         </div>
         <div className="flex items-end gap-2">
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
@@ -417,7 +505,7 @@ function DayPeek({ offset, meals, loading, error, target }) {
               ? `Superato di ${Math.round(-remaining)} kcal`
               : `Restano ${Math.round(remaining)} kcal`}
         </div>
-        <div style={{ height: '8px', borderRadius: '999px', background: C.line, overflow: 'hidden' }}>
+        <div style={{ height: '8px', borderRadius: '999px', background: line, overflow: 'hidden' }}>
           <div style={{
             width: `${Math.min(pct, 1) * 100}%`, height: '100%',
             background: overTarget ? C.alert : C.good, borderRadius: '999px',
@@ -426,8 +514,8 @@ function DayPeek({ offset, meals, loading, error, target }) {
       </div>
       <div
         style={{
-          background: C.surface,
-          border: `1px solid ${C.line}`,
+          background: surf,
+          border: `1px solid ${line}`,
           borderRadius: '14px',
           padding: '22px',
         }}
@@ -450,9 +538,9 @@ function DayPeek({ offset, meals, loading, error, target }) {
           </div>
         </div>
       </div>
-      <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
+      <div style={{ background: surf, border: `1px solid ${line}`, borderRadius: '14px', padding: '20px' }}>
         <span style={{ fontSize: '12px', color: C.inkMuted }}>
-          {offset === 0 ? 'Pasti di oggi' : `Pasti del ${date.toLocaleDateString('it-IT', { day: 'numeric', month: 'long' })}`} · {meals.length}
+          {diaryMealsHeading(offset, date)} · {meals.length}
         </span>
         {error && (
           <div style={{ color: C.alert, fontSize: '12px', marginTop: '8px' }}>{error}</div>
@@ -468,7 +556,7 @@ function DayPeek({ offset, meals, loading, error, target }) {
               {PASTO_LABEL[g.pasto] || g.pasto}
             </div>
             {g.items.map((m) => (
-              <div key={m.id} style={{ fontSize: '13px', padding: '6px 0', borderBottom: `1px solid ${C.line}`, display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+              <div key={m.id} style={{ fontSize: '13px', padding: '6px 0', borderBottom: `1px solid ${line}`, display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.alimento}</span>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.inkMuted, flexShrink: 0 }}>{Math.round(m.kcal)}</span>
               </div>
@@ -565,9 +653,9 @@ export default function VoiceTrackDashboard() {
   // --- Tab attivo: 'diario' (dashboard) | 'traccia' (voce) ---
   const [view, setView] = useState('diario');
 
-  // --- Sfoglia diario: 0 = oggi, -1 = ieri, ecc. ---
+  // --- Sfoglia diario: 0 = oggi, -1 = ieri, +1 = domani (nessun tetto). ---
   const [dayOffset, setDayOffset] = useState(0);
-  // Cache pasti per giorni passati (chiave YYYY-MM-DD) — include prefetch adiacenti.
+  // Cache pasti per giorni ≠ oggi (chiave YYYY-MM-DD) — include prefetch adiacenti.
   const [dayCache, setDayCache] = useState({});
   // Bump per rieseguire il loader dei giorni passati dopo edit/delete (§5.2 del piano).
   const [historyTick, setHistoryTick] = useState(0);
@@ -737,6 +825,10 @@ export default function VoiceTrackDashboard() {
                 setStatus('live');
                 hasCache = true;
               }
+            } catch (e) {}
+            try {
+              const dayHydrated = await loadPersistedDayCache();
+              if (Object.keys(dayHydrated).length) setDayCache(dayHydrated);
             } catch (e) {}
             await fetchLive(parsed, hasCache); // silent=true se avevamo gia' la cache
           } else {
@@ -910,10 +1002,10 @@ export default function VoiceTrackDashboard() {
     return () => window.speechSynthesis.removeEventListener?.('voiceschanged', pickVoice);
   }, []);
 
-  // Warm-up anti cold start (§3.2 del Piano): all'apertura del tab Traccia
-  // pinga /health cosi' l'istanza e' gia' calda quando inizi a parlare.
+  // Warm-up anti cold start (§3.2 del Piano): Diario / Traccia / Scan
+  // pingano /health cosi' swipe giorno e log non pagano il cold start.
   useEffect(() => {
-    if ((view !== 'traccia' && view !== 'scan') || !config.apiUrl) return;
+    if ((view !== 'diario' && view !== 'traccia' && view !== 'scan') || !config.apiUrl) return;
     const base = config.apiUrl.replace(/\/$/, '');
     fetch(`${base}/health`).catch(() => {});
   }, [view, config.apiUrl]);
@@ -958,21 +1050,42 @@ export default function VoiceTrackDashboard() {
     [getDiaryDateStr],
   );
   const refreshAfterLog = useCallback((targetStr) => {
-    // Aggiorna il giorno su cui il log e' finito davvero (puo' differire da
-    // quello a schermo se l'utente ha cambiato giorno durante il flusso).
+    // Aggiorna il giorno su cui il log e' finito davvero (puo' differire dal
+    // latch Diario se la voce ha detto "ieri" / una data).
     const t = targetStr || activeLogDateRef.current || getDiaryDateStr();
-    if (t === fmtYMD(new Date())) {
-      fetchLive(config, true);
-    } else {
-      // Butta la cache del giorno target: al prossimo passaggio si ricarica.
+    const todayStr = fmtYMD(new Date());
+
+    // Porta il Diario sul giorno dichiarato (voce batte il giorno a schermo).
+    if (t && /^\d{4}-\d{2}-\d{2}$/.test(t)) {
+      const [y, m, d] = t.split('-').map(Number);
+      const targetDate = new Date(y, m - 1, d);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      targetDate.setHours(0, 0, 0, 0);
+      const nextOffset = Math.round((targetDate - today) / 86400000);
+      if (nextOffset !== dayOffset) {
+        dayPendingCommitRef.current = null;
+        setDayDragging(true);
+        setDayDragX(0);
+        dayDragXRef.current = 0;
+        setDayOffset(nextOffset);
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => setDayDragging(false));
+        });
+      }
+    }
+
+    // Oggi via dashboard; giorni passati: invalida dayCache + historyTick.
+    fetchLive(config, true);
+    if (t && t !== todayStr) {
       setDayCache((prev) => {
-        if (!(t in prev)) return prev;
         const next = { ...prev };
         delete next[t];
         return next;
       });
+      removePersistedDay(t);
+      setHistoryTick((tick) => tick + 1);
     }
-    if (dayOffset !== 0) setHistoryTick((tick) => tick + 1);
   }, [dayOffset, config, fetchLive, getDiaryDateStr]);
 
   const submitMeal = useCallback(async (spokenText, isClarification, viaVoice = true) => {
@@ -1042,8 +1155,8 @@ export default function VoiceTrackDashboard() {
         } else {
           setMicState('idle');
         }
-        // Aggiorna il giorno mostrato: oggi via dashboard, storico via dayCache.
-        refreshAfterLog(targetDate);
+        // Aggiorna il giorno mostrato: priorita' a data_dichiarata dal backend.
+        refreshAfterLog(json.data_dichiarata || targetDate);
         return;
       }
 
@@ -1385,7 +1498,7 @@ export default function VoiceTrackDashboard() {
       setSearchQty('');
       clearLogFlow();
       speak(json.riepilogo_vocale || 'Prodotto registrato.');
-      refreshAfterLog(targetDate);
+      refreshAfterLog(json.data_dichiarata || targetDate);
       runSearch(searchQuery);
       // Il backend ha fatto upsert/bump nel catalogo: riallinea stelline e conteggi.
       fetchCatalog();
@@ -1752,7 +1865,7 @@ export default function VoiceTrackDashboard() {
         clearLogFlow();
         setScanState('speaking');
         speak(json.riepilogo_vocale || 'Prodotto registrato.', () => setScanState('idle'));
-        refreshAfterLog(targetDate);
+        refreshAfterLog(json.data_dichiarata || targetDate);
         // Lo scan ok fa upsert silenzioso nel catalogo: riallinea le stelline.
         fetchCatalog();
         return;
@@ -2045,7 +2158,7 @@ export default function VoiceTrackDashboard() {
   const trendData = trendRange === 'year' ? year : trendRange === 'month' ? month : week;
 
   // Tap su un bucket del grafico trend → ci si sposta nel Diario a quella data
-  // (giorno / inizio settimana / primo del mese). dayOffset e' sempre <= 0.
+  // (giorno / inizio settimana / primo del mese).
   const goToDate = useCallback((dateStr) => {
     if (!dateStr) return;
     const [y, m, d] = dateStr.split('-').map(Number);
@@ -2058,7 +2171,7 @@ export default function VoiceTrackDashboard() {
     setDayDragging(true);
     setDayDragX(0);
     dayDragXRef.current = 0;
-    setDayOffset(Math.min(diffDays, 0));
+    setDayOffset(diffDays);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => setDayDragging(false));
     });
@@ -2094,9 +2207,9 @@ export default function VoiceTrackDashboard() {
   }, [setDayDrag]);
 
   const shiftDay = useCallback((delta) => {
-    if (delta < 0 && !config.apiUrl) return;
+    if (!config.apiUrl) return;
     if (dayPendingCommitRef.current != null) return;
-    const next = Math.min(dayOffset + delta, 0);
+    const next = dayOffset + delta;
     if (next === dayOffset) return;
     const w = dayPagerRef.current?.offsetWidth || 1;
     const targetX = delta < 0 ? w : -w;
@@ -2150,10 +2263,10 @@ export default function VoiceTrackDashboard() {
     }
     if (s.axis !== 'x') return;
     let x = dx;
-    // Rubber-band: niente futuro da oggi; niente passato senza API.
-    if ((dayOffset === 0 && x < 0) || (!config.apiUrl && x > 0)) x *= 0.35;
+    // Rubber-band solo senza API (demo): niente navigazione giorno.
+    if (!config.apiUrl) x *= 0.35;
     setDayDrag(x);
-  }, [dayOffset, config.apiUrl, setDayDrag]);
+  }, [config.apiUrl, setDayDrag]);
 
   const onDaySwipeEnd = useCallback(() => {
     const s = daySwipeRef.current;
@@ -2170,66 +2283,101 @@ export default function VoiceTrackDashboard() {
     const enough = Math.abs(dx) >= Math.max(DAY_SWIPE_MIN, w * DAY_SWIPE_RATIO);
     if (enough && dx > 0 && config.apiUrl) {
       shiftDay(-1);
-    } else if (enough && dx < 0 && dayOffset < 0) {
+    } else if (enough && dx < 0 && config.apiUrl) {
       shiftDay(1);
     } else {
       setDayDragging(false);
       setDayDrag(0);
     }
-  }, [config.apiUrl, dayOffset, shiftDay, setDayDrag]);
+  }, [config.apiUrl, shiftDay, setDayDrag]);
 
-  // Carica giorno corrente + prefetch adiacenti in dayCache.
+  // Carica giorno corrente + prefetch adiacenti in dayCache (SWR + batch).
   const dayCacheRef = useRef(dayCache);
   dayCacheRef.current = dayCache;
+  const historyTickRef = useRef(historyTick);
 
   useEffect(() => {
     if (!config.apiUrl) return;
     let cancelled = false;
-    const offsets = [...new Set([dayOffset, dayOffset - 1, dayOffset + 1])].filter((o) => o < 0);
+    const tickBumped = historyTick !== historyTickRef.current;
+    historyTickRef.current = historyTick;
+    const offsets = [...new Set([dayOffset, dayOffset - 1, dayOffset + 1])].filter((o) => o !== 0);
 
-    offsets.forEach((o) => {
+    const needed = [];
+    for (const o of offsets) {
       const str = fmtYMD(dateForOffset(o));
-      const force = o === dayOffset;
+      const selected = o === dayOffset;
       const cached = dayCacheRef.current[str];
-      // Prefetch: salta se già caricato ok; il giorno selezionato si ricarica sempre (historyTick).
-      if (!force && cached && !cached.loading && Array.isArray(cached.meals) && !cached.error) return;
+      const hasMeals = !!cached && Array.isArray(cached.meals);
+      const isStale = !cached?.at || (Date.now() - cached.at) > DAY_CACHE_STALE_MS;
 
-      setDayCache((prev) => ({
-        ...prev,
-        [str]: { meals: prev[str]?.meals ?? [], loading: true, error: '' },
-      }));
-      (async () => {
-        try {
-          const base = config.apiUrl.replace(/\/$/, '');
-          const res = await fetch(`${base}/daily_summary?date=${str}`, {
-            headers: config.apiKey ? { 'X-API-Key': config.apiKey } : {},
-          });
-          const json = await res.json().catch(() => null);
-          if (!res.ok || !json) throw new Error(`Risposta ${res.status} dal server`);
-          if (cancelled) return;
-          const loaded = (json.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` }));
-          setDayCache((prev) => ({ ...prev, [str]: { meals: loaded, loading: false, error: '' } }));
-        } catch (e) {
-          if (cancelled) return;
-          setDayCache((prev) => ({
-            ...prev,
-            [str]: { meals: prev[str]?.meals ?? [], loading: false, error: e.message || 'Impossibile caricare questo giorno' },
-          }));
+      if (!selected && hasMeals && !cached.error && !isStale) continue;
+      if (selected && hasMeals && !cached.error && !isStale && !tickBumped) continue;
+      needed.push(str);
+    }
+
+    if (needed.length === 0) return;
+
+    for (const str of needed) {
+      const cached = dayCacheRef.current[str];
+      const hasMeals = !!cached && Array.isArray(cached.meals);
+      if (!hasMeals) {
+        setDayCache((prev) => ({
+          ...prev,
+          [str]: { meals: prev[str]?.meals ?? [], loading: true, error: '', at: prev[str]?.at },
+        }));
+      }
+    }
+
+    (async () => {
+      try {
+        const base = config.apiUrl.replace(/\/$/, '');
+        const res = await fetch(`${base}/day_meals?dates=${needed.join(',')}`, {
+          headers: config.apiKey ? { 'X-API-Key': config.apiKey } : {},
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json || json.status !== 'ok' || !json.days) {
+          throw new Error(`Risposta ${res.status} dal server`);
         }
-      })();
-    });
+        if (cancelled) return;
+        const at = Date.now();
+        const updates = {};
+        for (const str of needed) {
+          const block = json.days[str] || { dettaglio: [] };
+          const loaded = (block.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` }));
+          updates[str] = { meals: loaded, loading: false, error: '', at };
+          persistDayCacheEntry(str, loaded);
+        }
+        setDayCache((prev) => ({ ...prev, ...updates }));
+      } catch (e) {
+        if (cancelled) return;
+        setDayCache((prev) => {
+          const next = { ...prev };
+          for (const str of needed) {
+            const cached = prev[str];
+            const hasMeals = !!cached && Array.isArray(cached.meals);
+            next[str] = {
+              meals: cached?.meals ?? [],
+              loading: false,
+              error: hasMeals ? '' : (e.message || 'Impossibile caricare questo giorno'),
+              at: cached?.at,
+            };
+          }
+          return next;
+        });
+      }
+    })();
 
     return () => { cancelled = true; };
   }, [dayOffset, config.apiUrl, config.apiKey, historyTick]);
 
   const mealsForOffset = useCallback((o) => {
     if (o === 0) return meals;
-    if (o > 0) return [];
     return dayCache[fmtYMD(dateForOffset(o))]?.meals ?? [];
   }, [meals, dayCache]);
 
   const metaForOffset = useCallback((o) => {
-    if (o >= 0) return { loading: false, error: '' };
+    if (o === 0) return { loading: false, error: '' };
     const entry = dayCache[fmtYMD(dateForOffset(o))];
     return { loading: !!entry?.loading, error: entry?.error || '' };
   }, [dayCache]);
@@ -2792,8 +2940,8 @@ export default function VoiceTrackDashboard() {
           onTouchEnd={onDaySwipeEnd}
           onTouchCancel={onDaySwipeEnd}
           style={{
-            background: C.surface,
-            border: `1px solid ${C.line}`,
+            background: daySurface(dayOffset),
+            border: `1px solid ${dayLine(dayOffset)}`,
             borderRadius: '14px',
             padding: '22px 22px 34px',
             flex: 1,
@@ -2830,19 +2978,19 @@ export default function VoiceTrackDashboard() {
               </button>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink }}>
-                  {dayOffset === 0 ? dayLabel() : dayLabel(selectedDate)}
+                  {diaryDayTitle(dayOffset, selectedDate)}
                 </span>
                 {dayOffset !== 0 && (
-                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${C.line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
+                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
                     {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
                   </button>
                 )}
               </div>
               <button
                 onClick={() => shiftDay(1)}
-                disabled={dayOffset === 0}
+                disabled={!config.apiUrl}
                 aria-label="Giorno successivo"
-                style={{ background: 'transparent', border: 'none', color: C.inkMuted, cursor: dayOffset === 0 ? 'default' : 'pointer', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: dayOffset === 0 ? 0.3 : 1 }}
+                style={{ background: 'transparent', border: 'none', color: config.apiUrl ? C.inkMuted : C.inkFaint, cursor: config.apiUrl ? 'pointer' : 'default', padding: '4px', display: 'flex', justifyContent: 'center', width: '32px', flexShrink: 0, opacity: config.apiUrl ? 1 : 0.4 }}
               >
                 <ChevronRight size={22} />
               </button>
@@ -3025,8 +3173,8 @@ export default function VoiceTrackDashboard() {
         {/* Azioni rapide: testo / barcode / voce → tab Traccia o Scan */}
           <div
             style={{
-              background: C.surface,
-              border: `1px solid ${C.line}`,
+              background: daySurface(dayOffset),
+              border: `1px solid ${dayLine(dayOffset)}`,
               borderRadius: '14px',
               padding: '18px 22px',
               flex: 1,
@@ -3070,8 +3218,8 @@ export default function VoiceTrackDashboard() {
         {/* Plate / macro breakdown */}
         <div
           style={{
-            background: C.surface,
-            border: `1px solid ${C.line}`,
+            background: daySurface(dayOffset),
+            border: `1px solid ${dayLine(dayOffset)}`,
             borderRadius: '14px',
             padding: '22px',
             flex: 1,
@@ -3106,9 +3254,9 @@ export default function VoiceTrackDashboard() {
         </div>
 
         {/* Meal log */}
-        <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
+        <div style={{ background: daySurface(dayOffset), border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '14px', padding: '20px' }}>
           <span style={{ fontSize: '12px', color: C.inkMuted }}>
-            {dayOffset === 0 ? 'Pasti di oggi' : `Pasti del ${selectedDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'long' })}`} · {displayedMeals.length}
+            {diaryMealsHeading(dayOffset, selectedDate)} · {displayedMeals.length}
           </span>
           {historyError && dayOffset !== 0 && (
             <div className="flex items-center gap-2 mt-2" style={{ color: C.alert, fontSize: '12px' }}>

@@ -37,7 +37,7 @@ TZ_ITALY = timezone(timedelta(hours=2))
 API_KEY = os.environ.get("VOICETRACK_API_KEY", "")
 
 # Versione applicativa, esposta da /health (aggiornare a ogni deploy significativo)
-APP_VERSION = os.environ.get("APP_VERSION", "deploy5-cors-open-2026-07-21")
+APP_VERSION = os.environ.get("APP_VERSION", "deploy5-day-meals-2026-07-23")
 
 # Open Food Facts (Deploy 4, §5 del Piano di Consolidamento).
 # API comunitaria senza SLA (§3.9 del registro): timeout corto e
@@ -61,6 +61,14 @@ _FONTI_VALIDE = {
     "voce", "barcode",
 }
 _FONTE_DEFAULT = "tasker-voce"
+
+_WEEKDAY_FULL_IT = [
+    "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica",
+]
+_MONTH_FULL_IT = [
+    "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+    "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+]
 
 
 def _cors_headers(request):
@@ -97,37 +105,146 @@ def _json_response(data, status=200):
     return (json.dumps(data, ensure_ascii=False), status, headers)
 
 
-def _resolve_target_datetime(body):
+def _now_italy() -> datetime:
+    return datetime.now(TZ_ITALY)
+
+
+def _today_label_it(d: date) -> str:
+    """Es. 'giovedì 23 luglio 2026' — per il prompt LLM."""
+    return f"{_WEEKDAY_FULL_IT[d.weekday()]} {d.day} {_MONTH_FULL_IT[d.month - 1]} {d.year}"
+
+
+def _parse_client_target_date(body) -> date | None:
     """
-    Risolve il datetime di registrazione.
-    - Se `target_date` manca: fallback a "adesso" (compatibilita' Tasker/client legacy)
-    - Se presente: formato obbligatorio YYYY-MM-DD
+    Legge target_date dal body. None se assente.
+    Solleva ValueError se presente ma malformato.
     """
     raw = str((body or {}).get("target_date", "")).strip()
     if not raw:
-        return datetime.now(TZ_ITALY)
+        return None
     try:
-        d = datetime.strptime(raw, "%Y-%m-%d").date()
+        return datetime.strptime(raw, "%Y-%m-%d").date()
     except ValueError as e:
         raise ValueError("Campo 'target_date' non valido. Usa formato YYYY-MM-DD.") from e
-    # Mezzogiorno locale: evita effetti collaterali vicino al cambio giorno.
-    return datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=TZ_ITALY)
 
 
-def _resolve_target_or_400(body):
+def _label_giorno(declared_date: date, today: date, etichetta_llm=None) -> str:
     """
-    Wrapper per gli handler: ritorna (log_dt, None) oppure (None, risposta_400).
-    Tiene il ValueError della data fuori dal try principale, cosi' altri
-    ValueError non vengono scambiati per errori di data.
+    Etichetta TTS per un giorno rispetto a oggi:
+    oggi / ieri / l'altro ieri / domani / dopodomani / sabato 26 luglio.
     """
+    delta = (today - declared_date).days
+    if delta == 0:
+        return "oggi"
+    if delta == 1:
+        return "ieri"
+    if delta == 2:
+        return "l'altro ieri"
+    if delta == -1:
+        return "domani"
+    if delta == -2:
+        return "dopodomani"
+    llm = str(etichetta_llm or "").strip()
+    if llm and any(ch.isdigit() for ch in llm):
+        return llm
+    return (
+        f"{_WEEKDAY_FULL_IT[declared_date.weekday()]} "
+        f"{declared_date.day} {_MONTH_FULL_IT[declared_date.month - 1]}"
+    )
+
+
+def _with_day_prefix(riepilogo: str, label: str) -> str:
+    """Prefissa il riepilogo con la conferma del giorno (es. 'Ieri hai mangiato. …')."""
+    body = (riepilogo or "").strip()
+    lab = (label or "").strip()
+    if not lab or lab.lower() == "oggi":
+        return body
+    lab_cap = lab[0].upper() + lab[1:]
+    low = body.lower()
+    if (
+        low.startswith(lab.lower())
+        or low.startswith("ieri ")
+        or low.startswith("l'altro ieri")
+        or low.startswith("domani ")
+        or low.startswith("dopodomani ")
+    ):
+        return body
+    if not body:
+        return f"{lab_cap} hai mangiato."
+    return f"{lab_cap} hai mangiato. {body}"
+
+
+def _resolve_meal_datetimes(body, llm_result=None):
+    """
+    Risolve (recorded_at, declared_at, etichetta, from_speech).
+
+    Precedenza giorno pasto: data_riferimento LLM → target_date client → oggi.
+    recorded_at e' sempre "adesso". Se il giorno dichiarato e' oggi, i due
+    datetime coincidono; altrimenti declared_at = mezzogiorno locale
+    (passato o futuro). Solleva ValueError solo per target_date malformato.
+    """
+    recorded_at = _now_italy()
+    today = recorded_at.date()
+    llm_result = llm_result or {}
+    from_speech = False
+    declared_date = None
+
+    raw_ref = llm_result.get("data_riferimento")
+    if raw_ref not in (None, "", "null"):
+        try:
+            declared_date = datetime.strptime(str(raw_ref).strip()[:10], "%Y-%m-%d").date()
+            from_speech = True
+        except ValueError:
+            declared_date = None
+
+    if declared_date is None:
+        declared_date = _parse_client_target_date(body)
+
+    etichetta_llm = llm_result.get("etichetta_giorno")
+
+    if declared_date is None:
+        return recorded_at, recorded_at, None, False
+
+    etichetta = _label_giorno(declared_date, today, etichetta_llm)
+
+    if declared_date == today:
+        # Coincide: stesso datetime reale (ora di registrazione).
+        return recorded_at, recorded_at, (etichetta if from_speech else None), from_speech
+
+    declared_at = datetime(
+        declared_date.year, declared_date.month, declared_date.day,
+        12, 0, 0, tzinfo=TZ_ITALY,
+    )
+    return recorded_at, declared_at, etichetta, from_speech
+
+
+def _resolve_meal_datetimes_or_400(body, llm_result=None):
+    """Wrapper: (tuple, None) oppure (None, risposta_400)."""
     try:
-        return _resolve_target_datetime(body), None
+        return _resolve_meal_datetimes(body, llm_result), None
     except ValueError as e:
         return None, _json_response({
             "status": "error",
             "message": str(e),
-            "riepilogo_vocale": "Data non valida. Usa il formato anno-mese-giorno."
+            "riepilogo_vocale": str(e),
         }, 400)
+
+
+def _attach_declared_meta(payload: dict, declared_at: datetime, etichetta) -> dict:
+    """Aggiunge data_dichiarata / etichetta e prefissa il riepilogo se backdatato."""
+    today = _now_italy().date()
+    d = declared_at.date()
+    payload = dict(payload)
+    payload["data_dichiarata"] = d.strftime("%Y-%m-%d")
+    if d != today:
+        label = etichetta or _label_giorno(d, today)
+        payload["etichetta_giorno"] = label
+        payload["riepilogo_vocale"] = _with_day_prefix(
+            payload.get("riepilogo_vocale", ""), label
+        )
+    elif etichetta:
+        payload["etichetta_giorno"] = etichetta
+    return payload
 
 
 @functions_framework.http
@@ -141,6 +258,7 @@ def voicetrack(request):
       POST /update_meal   → modifica una riga pasto per id
       POST /delete_meal   → elimina una riga pasto per id
       GET  /daily_summary → riepilogo giornata (TTS)
+      GET  /day_meals     → pasti di 1–7 date (batch PWA Diario)
       GET  /dashboard     → dati per la webapp
       GET  /config        → legge i target
       POST /config        → salva i target
@@ -175,6 +293,8 @@ def voicetrack(request):
         return _handle_delete_meal(request)
     elif path == "/daily_summary" and request.method == "GET":
         return _handle_daily_summary(request)
+    elif path == "/day_meals" and request.method == "GET":
+        return _handle_day_meals(request)
     elif path == "/dashboard" and request.method == "GET":
         return _handle_dashboard(request)
     elif path == "/config" and request.method == "GET":
@@ -218,9 +338,16 @@ def _handle_log_meal(request):
     (Tasker oggi non lo invia, quindi resta invariato senza toccare nulla).
     """
     body = request.get_json(silent=True) or {}
-    log_dt, date_err = _resolve_target_or_400(body)
-    if date_err:
-        return date_err
+    # Valida solo target_date client qui (prima dell'LLM); la data voce si
+    # risolve dopo la risposta Claude.
+    try:
+        _parse_client_target_date(body)
+    except ValueError as e:
+        return _json_response({
+            "status": "error",
+            "message": str(e),
+            "riepilogo_vocale": "Data non valida. Usa il formato anno-mese-giorno.",
+        }, 400)
     try:
         text = body.get("text", "").strip()
         fonte = body.get("fonte", _FONTE_DEFAULT)
@@ -237,20 +364,32 @@ def _handle_log_meal(request):
                 "riepilogo_vocale": "Non ho ricevuto nessun testo. Riprova."
             }, 400)
 
-        # 1. Chiama l'LLM per estrarre alimenti e macro
-        llm_result = parse_meal_with_llm(text)
+        today = _now_italy().date()
+        llm_result = parse_meal_with_llm(
+            text,
+            today_iso=today.strftime("%Y-%m-%d"),
+            today_label_it=_today_label_it(today),
+        )
 
         logging.info(f"[log_meal] risposta LLM: {json.dumps(llm_result, ensure_ascii=False)}")
 
-        # 2. Se l'LLM chiede chiarimento, ritorna subito senza scrivere
         if llm_result.get("status") == "needs_clarification":
             return _json_response(llm_result)
 
-        # 3. Se l'LLM ha estratto gli alimenti, scrivi su Google Sheets
-        if llm_result.get("status") == "ok" and llm_result.get("items"):
-            append_meal_rows(llm_result["items"], log_dt, fonte=fonte)
+        resolved, date_err = _resolve_meal_datetimes_or_400(body, llm_result)
+        if date_err:
+            return date_err
+        recorded_at, declared_at, etichetta, _from_speech = resolved
 
-        return _json_response(llm_result)
+        if llm_result.get("status") == "ok" and llm_result.get("items"):
+            append_meal_rows(
+                llm_result["items"],
+                recorded_at=recorded_at,
+                declared_at=declared_at,
+                fonte=fonte,
+            )
+
+        return _json_response(_attach_declared_meta(llm_result, declared_at, etichetta))
 
     except SheetConfigError as e:
         logging.error(f"[log_meal] configurazione foglio errata: {e}")
@@ -362,9 +501,10 @@ def _handle_scan_barcode(request):
     `grammi` opzionale: se assente → needs_clarification con scheda prodotto.
     """
     body = request.get_json(silent=True) or {}
-    log_dt, date_err = _resolve_target_or_400(body)
+    resolved, date_err = _resolve_meal_datetimes_or_400(body)
     if date_err:
         return date_err
+    recorded_at, declared_at, etichetta, _from_speech = resolved
     try:
         barcode = str(body.get("barcode", "")).strip()
         fonte = body.get("fonte", "pwa-barcode")
@@ -438,7 +578,12 @@ def _handle_scan_barcode(request):
             "grassi": round(per100["grassi"] * fattore, 1),
         }
 
-        append_meal_rows([item], log_dt, fonte=fonte)
+        append_meal_rows(
+            [item],
+            recorded_at=recorded_at,
+            declared_at=declared_at,
+            fonte=fonte,
+        )
 
         # Upsert silenzioso nel catalogo personale (barcode + nutrienti).
         try:
@@ -449,7 +594,7 @@ def _handle_scan_barcode(request):
                 off_code=barcode,
                 fonte="barcode",
                 bump_usage=True,
-                now_ts=log_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                now_ts=recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
             )
         except Exception as e:
             logging.warning(f"[scan_barcode] upsert catalogo fallito: {e}")
@@ -458,12 +603,12 @@ def _handle_scan_barcode(request):
             f"Registrato: {nome}, {round(grammi)} grammi. "
             f"{round(item['kcal'])} calorie, {round(item['proteine'])} grammi di proteine."
         )
-        return _json_response({
+        return _json_response(_attach_declared_meta({
             "status": "ok",
             "items": [item],
             "totale": {k: item[k] for k in ("kcal", "proteine", "carboidrati", "grassi")},
-            "riepilogo_vocale": riepilogo
-        })
+            "riepilogo_vocale": riepilogo,
+        }, declared_at, etichetta))
 
     except SheetConfigError as e:
         logging.error(f"[scan_barcode] configurazione foglio errata: {e}")
@@ -590,10 +735,11 @@ def _handle_daily_summary(request):
     """
     try:
         date_str = request.args.get("date", "")
+        today = _now_italy().date()
         if date_str:
             target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         else:
-            target_date = datetime.now(TZ_ITALY).date()
+            target_date = today
 
         rows = get_today_rows(target_date)
         tot = _totals(rows)
@@ -604,8 +750,10 @@ def _handle_daily_summary(request):
         kcal_rimaste = round(target["kcal"] - tot["kcal"], 1)
         proteine_rimaste = round(target["proteine"] - tot["proteine"], 1)
 
+        day_label = _label_giorno(target_date, today)
+        day_cap = day_label[0].upper() + day_label[1:]
         riepilogo = (
-            f"Oggi hai mangiato {round(tot['kcal'])} calorie: "
+            f"{day_cap} hai mangiato {round(tot['kcal'])} calorie: "
             f"{round(tot['proteine'])} grammi di proteine, "
             f"{round(tot['carboidrati'])} di carboidrati, "
             f"{round(tot['grassi'])} di grassi. "
@@ -645,6 +793,62 @@ def _handle_daily_summary(request):
             "status": "error",
             "message": f"Errore nel riepilogo: {str(e)}",
             "riepilogo_vocale": "Si è verificato un errore nel riepilogo. Riprova."
+        }, 500)
+
+
+def _handle_day_meals(request):
+    """
+    Endpoint GET /day_meals?dates=YYYY-MM-DD,YYYY-MM-DD,...
+    Batch per la PWA Diario: una lettura foglio, pasti di 1–7 date.
+    Niente TTS / target (restano su /daily_summary e /dashboard).
+    """
+    try:
+        raw = (request.args.get("dates") or "").strip()
+        if not raw:
+            return _json_response({
+                "status": "error",
+                "message": "Parametro dates obbligatorio (es. dates=2026-07-22,2026-07-23)",
+            }, 400)
+
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if not parts or len(parts) > 7:
+            return _json_response({
+                "status": "error",
+                "message": "Serve da 1 a 7 date ISO (YYYY-MM-DD) separate da virgola",
+            }, 400)
+
+        wanted = []
+        seen = set()
+        for p in parts:
+            try:
+                d = datetime.strptime(p, "%Y-%m-%d").date()
+            except ValueError:
+                return _json_response({
+                    "status": "error",
+                    "message": f"Data non valida: {p!r} (atteso YYYY-MM-DD)",
+                }, 400)
+            key = d.strftime("%Y-%m-%d")
+            if key not in seen:
+                seen.add(key)
+                wanted.append(key)
+
+        all_rows = get_all_meal_rows()
+        by_date = {}
+        for m in all_rows:
+            by_date.setdefault(m["date"], []).append(m)
+
+        days = {key: {"dettaglio": by_date.get(key, [])} for key in wanted}
+        return _json_response({"status": "ok", "days": days})
+
+    except SheetConfigError as e:
+        logging.error(f"[day_meals] configurazione foglio errata: {e}")
+        return _json_response({"status": "error", "message": str(e)}, 500)
+
+    except Exception as e:
+        logging.error(f"[day_meals] errore interno: {e}", exc_info=True)
+        return _json_response({
+            "status": "error",
+            "message": f"Errore nel caricamento pasti: {str(e)}",
         }, 500)
 
 
@@ -1044,9 +1248,10 @@ def _handle_log_catalog(request):
     scala, scrive pasto, bump usage / upsert.
     """
     body = request.get_json(silent=True) or {}
-    log_dt, date_err = _resolve_target_or_400(body)
+    resolved, date_err = _resolve_meal_datetimes_or_400(body)
     if date_err:
         return date_err
+    recorded_at, declared_at, etichetta, _from_speech = resolved
     try:
         catalog_id = str(body.get("catalog_id", body.get("id", ""))).strip()
         barcode = str(body.get("barcode", "")).strip()
@@ -1138,8 +1343,13 @@ def _handle_log_catalog(request):
             "grassi": round(per100["grassi"] * fattore, 1),
         }
 
-        now_ts = log_dt.strftime("%Y-%m-%d %H:%M:%S")
-        append_meal_rows([item], log_dt, fonte=fonte)
+        now_ts = recorded_at.strftime("%Y-%m-%d %H:%M:%S")
+        append_meal_rows(
+            [item],
+            recorded_at=recorded_at,
+            declared_at=declared_at,
+            fonte=fonte,
+        )
 
         # Upsert / bump catalogo
         try:
@@ -1160,12 +1370,12 @@ def _handle_log_catalog(request):
             f"Registrato: {nome}, {round(grammi)} grammi. "
             f"{round(item['kcal'])} calorie, {round(item['proteine'])} grammi di proteine."
         )
-        return _json_response({
+        return _json_response(_attach_declared_meta({
             "status": "ok",
             "items": [item],
             "totale": {k: item[k] for k in ("kcal", "proteine", "carboidrati", "grassi")},
             "riepilogo_vocale": riepilogo,
-        })
+        }, declared_at, etichetta))
 
     except SheetConfigError as e:
         logging.error(f"[log_catalog] foglio: {e}")

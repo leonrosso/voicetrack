@@ -20,13 +20,14 @@ SYSTEM_PROMPT = """Sei un nutrizionista esperto e preciso. Il tuo compito è ana
 REGOLE:
 1. Estrai ogni singolo alimento menzionato, inclusi condimenti e bevande.
 2. Per ogni alimento, stima: grammi, kcal, proteine (g), carboidrati (g), grassi (g).
-3. Se l'utente specifica una quantità (es. "500g di tacchino"), usala. 
+3. Se l'utente specifica una quantità (es. "500g di tacchino"), usala.
 4. Se la quantità è VAGA (es. "un piatto di pasta", "un po' di riso", "della carne"), NON inventare una quantità. Rispondi con status "needs_clarification" e chiedi di specificare i grammi. Suggerisci una porzione standard come riferimento.
 5. Eccezioni alla regola 4: per condimenti comuni (olio, sale, pepe, aceto) puoi stimare una dose standard senza chiedere (es. olio = 10ml/un cucchiaio). Per alimenti con unità naturale (es. "una mela", "un uovo", "una banana") puoi stimare il peso standard.
 6. I valori nutrizionali devono essere per la quantità specificata, NON per 100g.
 7. Considera il metodo di cottura se menzionato (alla griglia, fritto, bollito, ecc.) per aggiustare i grassi.
 8. Rispondi SOLO con JSON valido, nessun testo prima o dopo.
 9. BEVANDE E LIQUIDI in millilitri (es. "500 ml di birra", "200 ml di latte"): tratta i ml come grammi (per le bevande 1 ml ≈ 1 g) e metti il numero nel campo "grammi". NON aggiungere note, commenti, campi extra o testo sulla conversione: la risposta resta SOLO il JSON nel formato indicato. I valori nutrizionali vanno calcolati per la quantità dichiarata.
+10. DATA DEL PASTO: il messaggio utente indica quale giorno è "oggi". Se il testo contiene un riferimento temporale (ieri, l'altro ieri, domani, dopodomani, sabato scorso, sabato prossimo, il 16 luglio, lunedì scorso, ecc. — anche date future), risolvilo in data_riferimento (YYYY-MM-DD) e etichetta_giorno. Se NON c'è alcun riferimento temporale, metti data_riferimento e etichetta_giorno a null (NON inventare). Se manca l'anno, usa l'anno di oggi; se la data senza anno cadrebbe troppo lontana, scegli l'anno più vicino al senso (passato per "scorso", futuro per "prossimo"/"domani"). Per un weekday ambiguo senza "scorso"/"prossimo", preferisci la ricorrenza più vicina a oggi. NON includere il giorno nel riepilogo_vocale nutrizionale: lo aggiunge il sistema.
 
 FORMATO RISPOSTA (pasto registrato con successo):
 {
@@ -47,19 +48,23 @@ FORMATO RISPOSTA (pasto registrato con successo):
     "carboidrati": 00.0,
     "grassi": 00.0
   },
-  "riepilogo_vocale": "Breve frase in italiano che riassume il pasto e i totali per essere letta ad alta voce. Max 2 frasi."
+  "data_riferimento": null,
+  "etichetta_giorno": null,
+  "riepilogo_vocale": "Breve frase in italiano che riassume il pasto e i totali per essere letta ad alta voce. Max 2 frasi. Senza nominare il giorno."
 }
 
 FORMATO RISPOSTA (quantità vaga, serve chiarimento):
 {
   "status": "needs_clarification",
   "message": "Domanda specifica in italiano per chiarire la quantità",
-  "riepilogo_vocale": "Stessa domanda in forma naturale per TTS"
+  "riepilogo_vocale": "Stessa domanda in forma naturale per TTS",
+  "data_riferimento": null,
+  "etichetta_giorno": null
 }
 
 ESEMPI DI STIME ACCURATE:
 - Petto di pollo/tacchino: ~110 kcal, ~23g proteine, ~0g carbo, ~1.5g grassi per 100g
-- Pasta secca (cruda): ~350 kcal, ~12g proteine, ~72g carbo, ~1.5g grassi per 100g  
+- Pasta secca (cruda): ~350 kcal, ~12g proteine, ~72g carbo, ~1.5g grassi per 100g
 - Riso bianco (crudo): ~360 kcal, ~7g proteine, ~80g carbo, ~0.5g grassi per 100g
 - Olio EVO: ~900 kcal, ~0g proteine, ~0g carbo, ~100g grassi per 100ml
 - Uovo intero: ~70 kcal, ~6g proteine, ~0.5g carbo, ~5g grassi (1 uovo ~60g)
@@ -74,18 +79,20 @@ ESEMPI DI STIME ACCURATE:
 Rispondi SOLO con il JSON, niente altro."""
 
 
-def parse_meal_with_llm(text: str) -> dict:
+def parse_meal_with_llm(text: str, today_iso: str = "", today_label_it: str = "") -> dict:
     """
     Invia il testo del pasto all'LLM e ritorna il JSON strutturato.
-    
+
     Args:
         text: Testo trascritto dall'utente (in italiano)
-    
+        today_iso: Data di oggi YYYY-MM-DD (fuso Italia), per risolvere date relative
+        today_label_it: Etichetta leggibile (es. "giovedì 23 luglio 2026")
+
     Returns:
         dict con status "ok" o "needs_clarification"
     """
     if LLM_PROVIDER == "claude":
-        return _call_claude(text)
+        return _call_claude(text, today_iso=today_iso, today_label_it=today_label_it)
     elif LLM_PROVIDER == "openai":
         return _call_openai(text)
     else:
@@ -96,7 +103,18 @@ def parse_meal_with_llm(text: str) -> dict:
         }
 
 
-def _call_claude(text: str) -> dict:
+def _user_message(text: str, today_iso: str, today_label_it: str) -> str:
+    if today_iso and today_label_it:
+        return (
+            f"Oggi è {today_label_it} ({today_iso}).\n"
+            f"Testo dell'utente: {text}"
+        )
+    if today_iso:
+        return f"Oggi è {today_iso}.\nTesto dell'utente: {text}"
+    return text
+
+
+def _call_claude(text: str, today_iso: str = "", today_label_it: str = "") -> dict:
     """Chiama Claude API via SDK ufficiale."""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -106,7 +124,7 @@ def _call_claude(text: str) -> dict:
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": text}
+                {"role": "user", "content": _user_message(text, today_iso, today_label_it)}
             ]
         )
 
@@ -167,18 +185,6 @@ def _call_openai(text: str) -> dict:
     Stessa interfaccia di _call_claude.
     """
     # TODO: Implementare quando necessario
-    # import openai
-    # client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    # response = client.chat.completions.create(
-    #     model="gpt-4o-mini",
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": text}
-    #     ],
-    #     max_tokens=1024,
-    #     response_format={"type": "json_object"}
-    # )
-    # return json.loads(response.choices[0].message.content)
     return {
         "status": "error",
         "message": "Provider OpenAI non ancora implementato.",

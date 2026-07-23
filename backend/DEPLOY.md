@@ -18,9 +18,11 @@ voicetrack/
 2. Rinomina il primo foglio (tab in basso) in **"Pasti"**
 3. Nella riga 1, inserisci le intestazioni:
 
-| A | B | C | D | E | F | G | H | I |
-|---|---|---|---|---|---|---|---|---|
-| timestamp | alimento | grammi | kcal | proteine | carboidrati | grassi | fonte | note |
+| A | B | C | D | E | F | G | H | I | J | K |
+|---|---|---|---|---|---|---|---|---|---|---|
+| timestamp | alimento | grammi | kcal | proteine | carboidrati | grassi | fonte | note | id | data_dichiarata |
+
+`timestamp` = quando il pasto e' stato registrato. `data_dichiarata` = giorno a cui appartiene il pasto (coincide con timestamp se non specificato; mezzogiorno del giorno scelto se backdatato). Le righe vecchie senza K restano valide in lettura.
 
 4. Assicurati che il foglio sia condiviso con l'email del Service Account (quella che finisce con `@...iam.gserviceaccount.com`)
 
@@ -131,5 +133,19 @@ Riepilogo della giornata. Parametro opzionale `?date=2026-04-04`.
   "target": {"kcal": 3000, "proteine": 300, ...},
   "rimanenti": {"kcal": 1150, "proteine": 135, ...},
   "riepilogo_vocale": "Oggi hai mangiato 1850 calorie..."
+}
+```
+
+### GET /day_meals
+Batch pasti per la PWA Diario. Parametro obbligatorio `?dates=YYYY-MM-DD,YYYY-MM-DD,...` (1–7 date). Una sola lettura foglio; niente TTS/target.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "days": {
+    "2026-07-22": { "dettaglio": [ /* stesso shape di daily_summary.dettaglio */ ] },
+    "2026-07-24": { "dettaglio": [] }
+  }
 }
 ```

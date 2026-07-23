@@ -14,6 +14,36 @@
 
 ---
 
+## 2026-07-23 — Cache Config + /day_meals batch (Cursor)
+**Fatto:** cache TTL 20s + single-flight su `get_config_targets` (invalidate su `set_config_targets`); nuovo `GET /day_meals?dates=` (1–7 date, una lettura pasti, solo `dettaglio`); PWA Diario fa una fetch batch al posto di N `/daily_summary`. Tasker e forma `/daily_summary` invariati. Deploy CF → `voicetrack-00029-bob`, ACTIVE; `/health` `deploy5-day-meals-2026-07-23`.
+**Nuove superfici/config:** endpoint `/day_meals`; docs DEPLOY.md.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera).
+**Prossimo passo:** deploy Vercel; test telefono swipe (una request Network per i giorni da aggiornare).
+
+## 2026-07-23 — Cache schede giorno (Cursor)
+**Fatto:** accelerato caricamento Diario giorni ≠ oggi senza cambiare contratti API. Backend: cache in-memory TTL 20s + single-flight su `get_all_meal_rows` (3× `/daily_summary` paralleli → 1 lettura Sheets); invalidate su append/update/delete. Frontend: SWR su `dayCache` (mostra subito se in cache, loading solo a vuoto), persistenza `vt-day-cache` (max 40 giorni), warm `/health` anche su Diario, peeks futuro da cache. Deploy CF → `voicetrack-00028-dib`, ACTIVE; `/health` `deploy5-day-cache-2026-07-23`; Tasker invariato.
+**Nuove superfici/config:** localStorage `vt-day-cache` `{version:1, days:{YYYY-MM-DD:{meals,at}}}`.
+**Bug aperti/chiusi:** chiuso (codice) peeks futuro sempre vuoti (`mealsForOffset`/`metaForOffset` ignoravano cache per offset>0). Invariati ml parsing; focus camera.
+**Prossimo passo:** deploy Vercel; test telefono swipe ieri/domani (2ª visita istantanea) + log su giorno storico aggiorna cache.
+
+## 2026-07-23 — Sfondo schede passate (Cursor)
+**Fatto:** schede Diario dei giorni passati (`dayOffset < 0`) usano `C.surfacePast` / `linePast` (marrone caldo), distinte da oggi (verde) e futuro (slate). Helper `daySurface`/`dayLine` a tre vie.
+**Nuove superfici/config:** `C.surfacePast`, `C.linePast`.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica su telefono / Vercel (oggi verde, ieri caldo, domani slate).
+
+## 2026-07-23 — Diario futuro illimitato + sfondo schede (Cursor)
+**Fatto:** Diario swipe senza tetto passato/futuro (`dayOffset` libero); schede future con `C.surfaceFuture` / `lineFuture` (slate); titoli Ieri/Domani; prefetch `daily_summary` anche su offset > 0. Backend: rimossi limiti «no future» e «max 1 anno»; etichette TTS `domani`/`dopodomani`; prompt LLM ammette date future. Tasker invariato. Deploy CF → `voicetrack-00027-nuv`, ACTIVE.
+**Nuove superfici/config:** `C.surfaceFuture`, `C.lineFuture`; helper `daySurface`/`diaryDayTitle`.
+**Bug aperti/chiusi:** chiuso (codice+live backend) blocco navigazione/log oltre oggi. Invariati ml parsing; focus camera.
+**Prossimo passo:** deploy Vercel; test swipe domani (sfondo slate) + «domani 200 g yogurt» TTS su telefono/Tasker.
+
+## 2026-07-23 — Data dichiarata + log vocale giorni passati (Cursor)
+**Fatto:** colonna Sheets `data_dichiarata` (K) distinta da `timestamp` (A); `/log_meal` passa «oggi è…» all'LLM e risolve date relative («ieri», «l'altro ieri», «sabato scorso», …); precedenza voce > `target_date` Diario > oggi; validazione no future / max 1 anno; riepilogo TTS con conferma giorno; stesso split A/K su `/scan_barcode` e `/log_catalog`; fix `/daily_summary` che diceva sempre «Oggi» anche con `?date≠oggi`; PWA usa `data_dichiarata` restituita per refresh + salto `dayOffset`. Tasker invariato. Aggiornati `DEPLOY.md`, §3/§4/§9 stato. Deploy CF gen2 → revisione `voicetrack-00026-qaw`, state ACTIVE; `/health` 200 (`deploy5-data-dichiarata-2026-07-23`); `/daily_summary?date=ieri` → «Ieri hai mangiato…».
+**Nuove superfici/config:** schema pasti A–K (`data_dichiarata`); risposta API `data_dichiarata` / `etichetta_giorno`; header K1 da aggiungere sul foglio Google.
+**Bug aperti/chiusi:** chiuso (codice+live) TTS summary «Oggi» su giorni storici. Invariati ml parsing; focus camera. Nota UX accettata: backdate a 12:00 → fascia «pranzo».
+**Prossimo passo:** header K1 sul foglio; test frasi §9 (voce + Diario+ieri + Tasker TTS); deploy Vercel PWA.
+
 ## 2026-07-22 — Didascalia mic EAN (Cursor)
 **Fatto:** sotto il pulsante microfono della card «inserisci l'EAN» (tab Scan) aggiunto il testo «OPPURE DETTA IL CODICE EAN», stesso stile e gap bottone→testo (`gap-3` + mono 12px) della didascalia «TOCCA E INQUADRA» sulla card fotocamera. Titolo card: «INSERIMENTO MANUALE», centrato (ex «OPPURE INSERISCI L'EAN A MANO»).
 **Nuove superfici/config:** nessuna.
