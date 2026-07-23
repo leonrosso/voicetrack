@@ -5,7 +5,7 @@ import {
   Beef, Wheat, Droplet, Mic, AlertCircle, Check, UtensilsCrossed,
   LayoutGrid, Volume2, Loader2, MessageCircleQuestion,
   ChevronLeft, ChevronRight, Send, ScanLine, Camera,
-  Pencil, Trash2, Keyboard, Plus, Minus, Search, Star
+  Pencil, Trash2, Keyboard, Plus, Minus, Search, Star, Calendar
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
@@ -90,23 +90,7 @@ const EXTRA_CSS = `
   opacity: 1;
   transform: translateX(0);
 }
-.vt-edit-confirm-fill {
-  transform-origin: left center;
-  transform: scaleX(0);
-  transition: transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-.vt-edit-confirm-fill.is-open {
-  transform: scaleX(1);
-}
-.vt-edit-confirm-content {
-  opacity: 0;
-  transform: translateX(-12px);
-  transition: opacity 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-.vt-edit-confirm-content.is-open {
-  opacity: 1;
-  transform: translateX(0);
-}`;
+`;
 
 // ---------------------------------------------------------------------------
 // Web Speech API — riconoscimento vocale del browser.
@@ -129,6 +113,61 @@ const MAX_CLARIFY_ROUNDS = 3;
 
 /** Normalizza nomi alimento per match catalogo ↔ riga Diario. */
 const normalizeFoodName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * Estrae un EAN/UPC (8–14 cifre) da un link scheda Open Food Facts,
+ * da testo con URL dentro, o da sole cifre. Usato da campo Scan + Share Target.
+ */
+const parseOffBarcode = (raw) => {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+
+  const asDigits = (s) => {
+    const d = String(s || '').replace(/\D/g, '');
+    return d.length >= 8 && d.length <= 14 ? d : null;
+  };
+
+  const fromUrl = (urlStr) => {
+    try {
+      const u = new URL(urlStr);
+      const host = (u.hostname || '').toLowerCase();
+      if (!host.includes('openfoodfacts')) return null;
+      const pathMatch = u.pathname.match(/\/product\/(\d{8,14})\b/i);
+      if (pathMatch) return pathMatch[1];
+      const code = u.searchParams.get('code') || u.searchParams.get('barcode');
+      const fromQuery = asDigits(code);
+      if (fromQuery) return fromQuery;
+    } catch (e) { /* non-URL */ }
+    return null;
+  };
+
+  const bare = asDigits(text);
+  if (bare && /^\d{8,14}$/.test(text.replace(/\s+/g, ''))) return bare;
+
+  const urlRe = /https?:\/\/[^\s<>"']+/gi;
+  let m;
+  while ((m = urlRe.exec(text)) !== null) {
+    const code = fromUrl(m[0].replace(/[),.;]+$/, ''));
+    if (code) return code;
+  }
+
+  // Path relativo o host senza schema (es. world.openfoodfacts.org/product/…)
+  const hostPath = text.match(
+    /(?:^|\s)((?:[\w-]+\.)?openfoodfacts\.org\/[^\s<>"']+)/i,
+  );
+  if (hostPath) {
+    const code = fromUrl(`https://${hostPath[1].replace(/[),.;]+$/, '')}`);
+    if (code) return code;
+  }
+
+  const productPath = text.match(/\/product\/(\d{8,14})\b/i);
+  if (productPath) return productPath[1];
+
+  const codeParam = text.match(/[?&](?:code|barcode)=(\d{8,14})\b/i);
+  if (codeParam) return codeParam[1];
+
+  return asDigits(text);
+};
 
 // ---------------------------------------------------------------------------
 // Storage: usa localStorage del browser (persiste tra refresh e riavvii della
@@ -168,6 +207,12 @@ const DEMO_MEALS_TODAY = [
 // YYYY-MM-DD in ora locale (niente toISOString: sballerebbe il fuso).
 const fmtYMD = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const parseYMD = (str) => {
+  const [y, m, d] = String(str || '').split('-').map(Number);
+  if (!y || !m || !d) return new Date();
+  return new Date(y, m - 1, d);
+};
 
 // Indicizzato su Date.getDay() (0 = domenica), stesse etichette di WEEKDAY_IT
 // nel backend (che invece indicizza su weekday(), 0 = lunedi').
@@ -247,6 +292,41 @@ const SCAN_TARGET_ZOOM = 2; // tipicamente fa uscire dalla 0.5x sulla lente prin
 
 function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
+}
+
+/** Porta un campo del pannello edit nella zona visibile sopra la tastiera (visualViewport). */
+function ensureEditFieldVisible(el, { margin = 16 } = {}) {
+  if (!el || typeof el.getBoundingClientRect !== 'function') return;
+  const vv = window.visualViewport;
+  if (!vv) {
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    return;
+  }
+  const rect = el.getBoundingClientRect();
+  const visibleTop = vv.offsetTop + margin;
+  const visibleBottom = vv.offsetTop + vv.height - margin;
+  let delta = 0;
+  if (rect.bottom > visibleBottom) delta = rect.bottom - visibleBottom;
+  else if (rect.top < visibleTop) delta = rect.top - visibleTop;
+  if (Math.abs(delta) > 1) {
+    window.scrollBy({ top: delta, behavior: 'smooth' });
+  }
+}
+
+function scheduleEnsureEditFieldVisible(el) {
+  if (!el) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      ensureEditFieldVisible(el);
+      setTimeout(() => ensureEditFieldVisible(el), 120);
+    });
+  });
+}
+
+function keyboardInsetPx() {
+  const vv = window.visualViewport;
+  if (!vv) return 0;
+  return Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
 }
 
 /** Preferisce la back camera "normale", evita ultra-wide / front se le label ci sono. */
@@ -707,6 +787,9 @@ const toNum = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// Arrotonda a 1 decimale (stessa convenzione del form catalogo da pasto).
+const round1 = (v) => Math.round(v * 10) / 10;
+
 // Arrotonda {p,c,g} a interi che sommano ESATTAMENTE a 100 (metodo del resto
 // più grande): floor di ciascuno, poi i punti mancanti vanno alle frazioni
 // più alte.
@@ -783,6 +866,8 @@ export default function VoiceTrackDashboard() {
 
   // --- Sfoglia diario: 0 = oggi, -1 = ieri, +1 = domani (nessun tetto). ---
   const [dayOffset, setDayOffset] = useState(0);
+  const [diaryCalOpen, setDiaryCalOpen] = useState(false);
+  const [diaryCalMode, setDiaryCalMode] = useState('month'); // 'week' | 'month'
   // Cache pasti per giorni ≠ oggi (chiave YYYY-MM-DD) — include prefetch adiacenti.
   const [dayCache, setDayCache] = useState({});
   // Bump per rieseguire il loader dei giorni passati dopo edit/delete (§5.2 del piano).
@@ -800,13 +885,19 @@ export default function VoiceTrackDashboard() {
   // --- Edit / delete pasti (Deploy 5 §7.2) ---
   const [editingId, setEditingId] = useState(null);        // id del pasto col pannello aperto
   const [editDraft, setEditDraft] = useState(null);        // { alimento, grammi, kcal, proteine, carboidrati, grassi }
+  const [editBaseline, setEditBaseline] = useState(null);  // valori a openEdit: scala grammi → kcal/P/C/G
   const [editBusy, setEditBusy] = useState(false);
   const [editError, setEditError] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id in attesa di conferma elimina
-  const [confirmEditId, setConfirmEditId] = useState(null);     // id in attesa di conferma modifica (swipe)
   const [swipeId, setSwipeId] = useState(null);            // riga trascinata
   const [swipeX, setSwipeX] = useState(0);                 // offset corrente (px, ±SWIPE_MAX)
+  const [swipeSettling, setSwipeSettling] = useState(false); // coreografia reveal edit post-swipe
   const suppressRowClickRef = useRef(false);                // evita che il click sintetico post-touch riapra il pannello appena chiuso
+  const editRevealTimersRef = useRef([]);
+  // Durante edit: non far restringere il fold dalla tastiera; spacer = altezza tastiera.
+  const lockAppHeightRef = useRef(false);
+  const setAppHeightRef = useRef(() => {});
+  const [keyboardInset, setKeyboardInset] = useState(0);
 
   const POLL_MS = 20000; // refresh dati ogni 20s mentre l'app e' aperta e visibile
 
@@ -906,26 +997,61 @@ export default function VoiceTrackDashboard() {
   // --app-height da visualViewport: su Android PWA 100dvh al refresh diventa più alto
   // (include gesture bar) e slarga il fold. Lo script in index.html fa il primo set;
   // qui teniamo i listener anche dopo il mount React.
+  // Con pannello edit aperto (lockAppHeightRef) non aggiorniamo su resize soft
+  // (tastiera): altrimenti il fold si schiaccia e i campi finiscono sotto.
   useEffect(() => {
     const setAppHeight = () => {
       const h = window.visualViewport?.height ?? window.innerHeight;
       document.documentElement.style.setProperty('--app-height', `${Math.round(h)}px`);
     };
+    setAppHeightRef.current = setAppHeight;
+    const onSoftResize = () => {
+      if (lockAppHeightRef.current) return;
+      setAppHeight();
+    };
+    const onHardResize = () => setAppHeight();
     setAppHeight();
-    window.addEventListener('resize', setAppHeight);
-    window.addEventListener('orientationchange', setAppHeight);
-    window.addEventListener('pageshow', setAppHeight);
+    window.addEventListener('resize', onSoftResize);
+    window.addEventListener('orientationchange', onHardResize);
+    window.addEventListener('pageshow', onHardResize);
     const vv = window.visualViewport;
-    vv?.addEventListener('resize', setAppHeight);
-    vv?.addEventListener('scroll', setAppHeight);
+    vv?.addEventListener('resize', onSoftResize);
+    vv?.addEventListener('scroll', onSoftResize);
     return () => {
-      window.removeEventListener('resize', setAppHeight);
-      window.removeEventListener('orientationchange', setAppHeight);
-      window.removeEventListener('pageshow', setAppHeight);
-      vv?.removeEventListener('resize', setAppHeight);
-      vv?.removeEventListener('scroll', setAppHeight);
+      window.removeEventListener('resize', onSoftResize);
+      window.removeEventListener('orientationchange', onHardResize);
+      window.removeEventListener('pageshow', onHardResize);
+      vv?.removeEventListener('resize', onSoftResize);
+      vv?.removeEventListener('scroll', onSoftResize);
     };
   }, []);
+
+  // Mentre si edita un pasto: inset tastiera + riporta il campo attivo in vista.
+  // ensureVisible solo su resize (tastiera), non su vv.scroll (evita lotta con lo scroll utente).
+  useEffect(() => {
+    if (!editingId) {
+      setKeyboardInset(0);
+      return undefined;
+    }
+    const syncInset = () => setKeyboardInset(keyboardInsetPx());
+    const onKeyboardResize = () => {
+      syncInset();
+      const ae = document.activeElement;
+      if (ae?.closest?.('[data-vt-edit-panel]')) {
+        ensureEditFieldVisible(ae);
+      }
+    };
+    syncInset();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', onKeyboardResize);
+    vv?.addEventListener('scroll', syncInset);
+    window.addEventListener('resize', onKeyboardResize);
+    return () => {
+      vv?.removeEventListener('resize', onKeyboardResize);
+      vv?.removeEventListener('scroll', syncInset);
+      window.removeEventListener('resize', onKeyboardResize);
+    };
+  }, [editingId]);
 
   // Load saved endpoint config on mount.
   useEffect(() => {
@@ -1109,7 +1235,7 @@ export default function VoiceTrackDashboard() {
   const clarifyRoundsRef = useRef(0);
   const activeLogDateRef = useRef(''); // YYYY-MM-DD bloccata all'avvio del flusso di log
   const voiceRef = useRef(null);       // voce italiana per SpeechSynthesis
-  const pendingActionRef = useRef(null); // 'text' | 'voice' | 'scan' | 'cerca' | null
+  const pendingActionRef = useRef(null); // 'text' | 'voice' | 'scan' | 'ean' | 'off' | 'cerca' | null
   const typedInputRef = useRef(null);
   const searchInputRef = useRef(null);
 
@@ -1895,18 +2021,25 @@ export default function VoiceTrackDashboard() {
   const [scanState, setScanState] = useState('idle'); // idle | scanning | asking_qty | processing | speaking
   const [scanProduct, setScanProduct] = useState(null); // { barcode, nome, per_100g }
   const [scanQty, setScanQty] = useState('');
+  const [scanLogDate, setScanLogDate] = useState(''); // YYYY-MM-DD nello step «quanti grammi»
+  const [scanCalOpen, setScanCalOpen] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [scanError, setScanError] = useState('');
   const [scanNotFound, setScanNotFound] = useState('');
   const [qtyListening, setQtyListening] = useState(false);
   const [eanListening, setEanListening] = useState(false);
   const [manualEan, setManualEan] = useState('');
+  const [offLink, setOffLink] = useState('');
 
   const videoRef = useRef(null);
+  /** Share Target / deep link OFF: barcode da inviare a Scan, o '' se parse fallito. */
+  const pendingOffBarcodeRef = useRef(null);
   const streamRef = useRef(null);
   const detectTimerRef = useRef(null);
   const qtyRecRef = useRef(null);
   const eanRecRef = useRef(null);
+  const scanStateRef = useRef(scanState);
+  scanStateRef.current = scanState;
 
   const barcodeSupported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
 
@@ -1927,12 +2060,15 @@ export default function VoiceTrackDashboard() {
     setScanState('idle');
     setScanProduct(null);
     setScanQty('');
+    setScanLogDate('');
+    setScanCalOpen(false);
     setScanResult(null);
     setScanError('');
     setScanNotFound('');
     setQtyListening(false);
     setEanListening(false);
     setManualEan('');
+    setOffLink('');
   }, [stopCamera, clearLogFlow]);
 
   // Uscendo dal tab Scan (o smontando): camera spenta, stato pulito.
@@ -1968,6 +2104,8 @@ export default function VoiceTrackDashboard() {
       if (json.status === 'needs_clarification' && json.product) {
         // Prodotto trovato, manca la quantita': input touch (default §9.3) + mic.
         setScanProduct({ barcode, ...json.product });
+        setScanLogDate(getTargetDateForLog());
+        setScanCalOpen(false);
         setScanState('speaking');
         speak(json.riepilogo_vocale || `Trovato ${json.product.nome}. Quanti grammi?`, () => setScanState('asking_qty'));
         return;
@@ -1989,6 +2127,8 @@ export default function VoiceTrackDashboard() {
       if (json.status === 'ok') {
         setScanProduct(null);
         setScanQty('');
+        setScanLogDate('');
+        setScanCalOpen(false);
         setScanResult(json);
         clearLogFlow();
         setScanState('speaking');
@@ -2021,6 +2161,44 @@ export default function VoiceTrackDashboard() {
     sendBarcode(code, null);
     setManualEan('');
   }, [manualEan, scanState, stopCamera, sendBarcode]);
+
+  // Link scheda OFF (o testo con URL / EAN nudo) → stesso flusso di sendBarcode.
+  const submitOffLink = useCallback(() => {
+    if (scanState !== 'idle') return;
+    const code = parseOffBarcode(offLink);
+    if (!code) {
+      setScanError('Link Open Food Facts non riconosciuto. Incolla un URL prodotto o un EAN.');
+      return;
+    }
+    stopCamera();
+    setScanError('');
+    setOffLink('');
+    sendBarcode(code, null);
+  }, [offLink, scanState, stopCamera, sendBarcode]);
+
+  /** Da Share Target / ?action=off: tab Scan idle poi sendBarcode (o errore). */
+  const kickOffBarcode = useCallback((code) => {
+    stopCamera();
+    try { qtyRecRef.current?.abort?.(); } catch (e) {}
+    try { eanRecRef.current?.abort?.(); } catch (e) {}
+    setQtyListening(false);
+    setEanListening(false);
+    setScanProduct(null);
+    setScanQty('');
+    setScanCalOpen(false);
+    setScanResult(null);
+    setScanNotFound('');
+    setOffLink('');
+    setManualEan('');
+    setScanState('idle');
+    scanStateRef.current = 'idle';
+    if (!code) {
+      setScanError('Link Open Food Facts non riconosciuto.');
+      return;
+    }
+    setScanError('');
+    sendBarcode(code, null);
+  }, [stopCamera, sendBarcode]);
 
   const startScan = useCallback(async () => {
     if (!barcodeSupported || scanState !== 'idle') return;
@@ -2085,20 +2263,70 @@ export default function VoiceTrackDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [barcodeSupported, scanState, sendBarcode, stopCamera]);
 
+  // Microfono per EAN a mano: one-shot, tiene solo le cifre dette.
+  // Prima di launchQuickAction: serve a ?action=ean (Tasker) senza aprire la camera.
+  const listenManualEan = useCallback(() => {
+    if (!SpeechRecognitionAPI || eanListening || scanStateRef.current !== 'idle') return;
+    try { window.speechSynthesis?.cancel(); } catch (e) {}
+    const rec = new SpeechRecognitionAPI();
+    rec.lang = 'it-IT';
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (event) => {
+      const said = event.results?.[0]?.[0]?.transcript || '';
+      const digits = said.replace(/\D/g, '');
+      if (digits) setManualEan(digits);
+    };
+    rec.onend = () => { eanRecRef.current = null; setEanListening(false); };
+    rec.onerror = () => { eanRecRef.current = null; setEanListening(false); };
+    eanRecRef.current = rec;
+    setEanListening(true);
+    try { rec.start(); } catch (e) { setEanListening(false); }
+  }, [eanListening]);
+
+  /** Deep link / azioni: tab Scan idle + dettatura EAN (niente camera). */
+  const kickManualEan = useCallback(() => {
+    stopCamera();
+    try { qtyRecRef.current?.abort?.(); } catch (e) {}
+    try { eanRecRef.current?.abort?.(); } catch (e) {}
+    setQtyListening(false);
+    setEanListening(false);
+    setScanProduct(null);
+    setScanQty('');
+    setScanCalOpen(false);
+    setScanResult(null);
+    setScanError('');
+    setScanNotFound('');
+    setScanState('idle');
+    scanStateRef.current = 'idle';
+    requestAnimationFrame(() => {
+      setTimeout(() => listenManualEan(), 120);
+    });
+  }, [stopCamera, listenManualEan]);
+
   // Card azioni rapide sul Diario: dopo setView, avvia focus / mic / camera.
   // CERCA apre un overlay fisso (non entra nel carosello Traccia).
   // Se siamo già sul tab target, setView è no-op → esegui subito (deep link / re-entry PWA).
+  // action=ean → Scan + dettatura EAN (senza camera).
+  // action=off → Scan + barcode da Share Target / link OFF (pendingOffBarcodeRef).
   const launchQuickAction = useCallback((action) => {
     beginLogFlow();
     if (action === 'cerca') {
       openSearch();
       return;
     }
-    const targetView = action === 'scan' ? 'scan' : 'traccia';
+    const targetView = (action === 'scan' || action === 'ean' || action === 'off') ? 'scan' : 'traccia';
     if (view === targetView) {
       pendingActionRef.current = null;
       if (action === 'scan') {
         startScan();
+      } else if (action === 'ean') {
+        kickManualEan();
+      } else if (action === 'off') {
+        const code = pendingOffBarcodeRef.current;
+        pendingOffBarcodeRef.current = null;
+        kickOffBarcode(code || '');
       } else if (action === 'voice') {
         if (micState === 'idle') startListening(false);
       } else if (action === 'text') {
@@ -2108,7 +2336,7 @@ export default function VoiceTrackDashboard() {
     }
     pendingActionRef.current = action;
     setView(targetView);
-  }, [openSearch, beginLogFlow, view, startScan, startListening, micState]);
+  }, [openSearch, beginLogFlow, view, startScan, kickManualEan, kickOffBarcode, startListening, micState]);
 
   useEffect(() => {
     const action = pendingActionRef.current;
@@ -2122,18 +2350,46 @@ export default function VoiceTrackDashboard() {
     } else if (action === 'scan' && view === 'scan') {
       pendingActionRef.current = null;
       startScan();
+    } else if (action === 'ean' && view === 'scan') {
+      pendingActionRef.current = null;
+      kickManualEan();
+    } else if (action === 'off' && view === 'scan') {
+      pendingActionRef.current = null;
+      const code = pendingOffBarcodeRef.current;
+      pendingOffBarcodeRef.current = null;
+      kickOffBarcode(code || '');
     }
-  }, [view, micState, startListening, startScan]);
+  }, [view, micState, startListening, startScan, kickManualEan, kickOffBarcode]);
 
-  // Deep link ?action=… (Tasker / shortcuts manifest). Pulisce l'URL dopo il consume
+  // Deep link ?action=… (Tasker / shortcuts / Share Target). Pulisce l'URL dopo il consume
   // così refresh / swipe-back non ri-triggerano. Re-legge su visibility/pageshow perché
   // la PWA standalone in background spesso non rimonta React.
   const consumeUrlAction = useCallback(() => {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('action');
     if (!raw) return;
+
+    if (raw === 'off') {
+      const blob = [params.get('url'), params.get('text'), params.get('title')]
+        .filter(Boolean)
+        .join('\n');
+      pendingOffBarcodeRef.current = parseOffBarcode(blob) || '';
+      params.delete('action');
+      params.delete('title');
+      params.delete('text');
+      params.delete('url');
+      const qs = params.toString();
+      const next = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
+      window.history.replaceState(window.history.state, '', next);
+      launchQuickAction('off');
+      return;
+    }
+
     const map = {
       scan: 'scan',
+      ean: 'ean',
+      ean_voce: 'ean',
+      barcode_voce: 'ean',
       cerca: 'cerca',
       voice: 'voice',
       voce: 'voice',
@@ -2231,8 +2487,19 @@ export default function VoiceTrackDashboard() {
   const confirmQty = useCallback(() => {
     const n = parseFloat(String(scanQty).replace(',', '.'));
     if (!scanProduct || !Number.isFinite(n) || n <= 0) return;
+    if (scanLogDate && /^\d{4}-\d{2}-\d{2}$/.test(scanLogDate)) {
+      activeLogDateRef.current = scanLogDate;
+    }
+    setScanCalOpen(false);
     sendBarcode(scanProduct.barcode, n);
-  }, [scanQty, scanProduct, sendBarcode]);
+  }, [scanQty, scanProduct, scanLogDate, sendBarcode]);
+
+  const setScanLogDateChoice = useCallback((ymd) => {
+    if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+    setScanLogDate(ymd);
+    activeLogDateRef.current = ymd;
+    setScanCalOpen(false);
+  }, []);
 
   // Opzione microfono per la quantita' (§9.3): one-shot, estrae il primo numero.
   const listenQty = useCallback(() => {
@@ -2254,27 +2521,6 @@ export default function VoiceTrackDashboard() {
     setQtyListening(true);
     try { rec.start(); } catch (e) { setQtyListening(false); }
   }, [qtyListening, scanState]);
-
-  // Microfono per EAN a mano: one-shot, tiene solo le cifre dette.
-  const listenManualEan = useCallback(() => {
-    if (!SpeechRecognitionAPI || eanListening || scanState !== 'idle') return;
-    try { window.speechSynthesis?.cancel(); } catch (e) {}
-    const rec = new SpeechRecognitionAPI();
-    rec.lang = 'it-IT';
-    rec.interimResults = false;
-    rec.continuous = false;
-    rec.maxAlternatives = 1;
-    rec.onresult = (event) => {
-      const said = event.results?.[0]?.[0]?.transcript || '';
-      const digits = said.replace(/\D/g, '');
-      if (digits) setManualEan(digits);
-    };
-    rec.onend = () => { eanRecRef.current = null; setEanListening(false); };
-    rec.onerror = () => { eanRecRef.current = null; setEanListening(false); };
-    eanRecRef.current = rec;
-    setEanListening(true);
-    try { rec.start(); } catch (e) { setEanListening(false); }
-  }, [eanListening, scanState]);
 
   const selectedDate = useMemo(() => {
     const d = new Date();
@@ -2310,8 +2556,8 @@ export default function VoiceTrackDashboard() {
     setDayDragX(x);
   }, []);
 
-  // Carosello giorno: dx → giorno prima, sx → giorno dopo (max oggi).
-  // Gesto solo dalla card calorie (data-no-tab-swipe); le tab non si muovono.
+  // Carosello giorno: dx → giorno prima, sx → giorno dopo.
+  // Gesto su tutto dayPager (fold + pasti); tab solo via bottoni in cima.
   const DAY_SWIPE_MIN = 56;
   const DAY_SWIPE_RATIO = 0.22;
 
@@ -2363,7 +2609,11 @@ export default function VoiceTrackDashboard() {
       daySwipeRef.current = null;
       return;
     }
-    if (e.target.closest?.('button, input, textarea, select, a')) {
+    if (editingId || confirmDeleteId || swipeId || diaryCalOpen || swipeSettling) {
+      daySwipeRef.current = null;
+      return;
+    }
+    if (e.target.closest?.('button, input, textarea, select, a, [data-no-day-swipe]')) {
       daySwipeRef.current = null;
       return;
     }
@@ -2373,7 +2623,7 @@ export default function VoiceTrackDashboard() {
       axis: null,
       width: dayPagerRef.current?.offsetWidth || 1,
     };
-  }, [targetsOpen, targetsAnimOpen]);
+  }, [targetsOpen, targetsAnimOpen, editingId, confirmDeleteId, swipeId, diaryCalOpen, swipeSettling]);
 
   const onDaySwipeMove = useCallback((e) => {
     const s = daySwipeRef.current;
@@ -2540,9 +2790,18 @@ export default function VoiceTrackDashboard() {
     setSwipeId(null);
     setSwipeX(0);
     setConfirmDeleteId(null);
-    setConfirmEditId(null);
     setEditError('');
+    lockAppHeightRef.current = true;
+    document.documentElement.setAttribute('data-vt-lock-app-height', '1');
     setEditingId(m.id);
+    const baseline = {
+      grammi: Number(m.grammi) || 0,
+      kcal: Number(m.kcal) || 0,
+      proteine: Number(m.proteine) || 0,
+      carboidrati: Number(m.carboidrati) || 0,
+      grassi: Number(m.grassi) || 0,
+    };
+    setEditBaseline(baseline);
     setEditDraft({
       alimento: m.alimento ?? '',
       grammi: m.grammi ?? 0,
@@ -2554,15 +2813,43 @@ export default function VoiceTrackDashboard() {
   }, []);
 
   const closeEdit = useCallback(() => {
+    lockAppHeightRef.current = false;
+    document.documentElement.removeAttribute('data-vt-lock-app-height');
     setEditingId(null);
     setEditDraft(null);
+    setEditBaseline(null);
     setEditError('');
+    setKeyboardInset(0);
+    setAppHeightRef.current();
   }, []);
 
   const num = (v) => {
     const n = parseFloat(String(v).replace(',', '.'));
     return Number.isFinite(n) ? n : 0;
   };
+
+  // Cambiando i grammi nel pannello edit: riscala kcal/P/C/G dalla baseline
+  // di openEdit (niente drift da arrotondamenti successivi). Macro/kcal
+  // digitati a mano restano indipendenti.
+  const onEditGrammiChange = useCallback((v) => {
+    setEditDraft((d) => {
+      if (!d) return d;
+      const baseG = editBaseline?.grammi;
+      const newG = parseFloat(String(v).replace(',', '.'));
+      if (!Number.isFinite(newG) || newG <= 0 || !(baseG > 0) || !editBaseline) {
+        return { ...d, grammi: v };
+      }
+      const factor = newG / baseG;
+      return {
+        ...d,
+        grammi: v,
+        kcal: round1(editBaseline.kcal * factor),
+        proteine: round1(editBaseline.proteine * factor),
+        carboidrati: round1(editBaseline.carboidrati * factor),
+        grassi: round1(editBaseline.grassi * factor),
+      };
+    });
+  }, [editBaseline]);
 
   // --- Obiettivi: split macro in % (Deploy 5 §7.2) -------------------------
   // Grammi in targetDraft = quantità precisa (digitazione / ±1 g).
@@ -2690,161 +2977,126 @@ export default function VoiceTrackDashboard() {
   const TAP_MAX_MOVE = 10;   // sotto questa soglia un tocco è un tap, non uno swipe
   const swipeStartXRef = useRef(0);
 
+  const clearEditRevealTimers = useCallback(() => {
+    editRevealTimersRef.current.forEach((id) => clearTimeout(id));
+    editRevealTimersRef.current = [];
+  }, []);
+
+  const runEditRevealThenOpen = useCallback((m) => {
+    clearEditRevealTimers();
+    setConfirmDeleteId(null);
+    setSwipeSettling(true);
+    setSwipeId(m.id);
+    // Peek verde → bounce → richiude → apre pannello (~340ms, niente matita/X).
+    setSwipeX(SWIPE_MAX);
+    const t1 = setTimeout(() => setSwipeX(Math.round(SWIPE_MAX * 0.55)), 120);
+    const t2 = setTimeout(() => setSwipeX(0), 220);
+    const t3 = setTimeout(() => {
+      openEdit(m);
+      setSwipeSettling(false);
+      editRevealTimersRef.current = [];
+    }, 340);
+    editRevealTimersRef.current = [t1, t2, t3];
+  }, [clearEditRevealTimers, openEdit]);
+
+  // Stessa coreografia dell'apertura, poi chiude il pannello.
+  const runEditRevealThenClose = useCallback(() => {
+    clearEditRevealTimers();
+    try { document.activeElement?.blur?.(); } catch { /* ignore */ }
+    setSwipeSettling(true);
+    setSwipeX(SWIPE_MAX);
+    const t1 = setTimeout(() => setSwipeX(Math.round(SWIPE_MAX * 0.55)), 120);
+    const t2 = setTimeout(() => setSwipeX(0), 220);
+    const t3 = setTimeout(() => {
+      closeEdit();
+      setSwipeSettling(false);
+      setSwipeId(null);
+      editRevealTimersRef.current = [];
+    }, 340);
+    editRevealTimersRef.current = [t1, t2, t3];
+  }, [clearEditRevealTimers, closeEdit]);
+
   const onRowTouchStart = useCallback((m, e) => {
     if (!isEditable(m)) return;
+    clearEditRevealTimers();
+    if (swipeSettling) setSwipeSettling(false);
     suppressRowClickRef.current = false;
     swipeStartXRef.current = e.touches[0].clientX;
-    // Stesso pasto in edit/conferma: niente swipe (tap chiude in touchEnd)
-    if (editingId === m.id || confirmDeleteId === m.id || confirmEditId === m.id) return;
+    // Conferma elimina sullo stesso pasto: niente swipe (tap chiude in touchEnd)
+    if (confirmDeleteId === m.id) return;
     // Altro pasto aperto: chiudi e avvia lo swipe su questo
-    if (editingId) closeEdit();
+    if (editingId && editingId !== m.id) closeEdit();
     if (confirmDeleteId) setConfirmDeleteId(null);
-    if (confirmEditId) setConfirmEditId(null);
+    // Stesso pasto in edit: swipe consentito (stessa direzione → chiude con animazione)
     setSwipeId(m.id);
-  }, [isEditable, confirmDeleteId, confirmEditId, editingId, closeEdit]);
+  }, [isEditable, confirmDeleteId, editingId, closeEdit, clearEditRevealTimers, swipeSettling]);
 
   const onRowTouchMove = useCallback((m, e) => {
+    if (swipeSettling) return;
     if (swipeId !== m.id) return;
     const dx = e.touches[0].clientX - swipeStartXRef.current;
+    // A pannello aperto: solo swipe di chiusura (sx→dx), come all'apertura
+    if (editingId === m.id) {
+      setSwipeX(Math.max(0, Math.min(SWIPE_MAX, dx)));
+      return;
+    }
     setSwipeX(Math.max(-SWIPE_MAX, Math.min(SWIPE_MAX, dx)));
-  }, [swipeId]);
+  }, [swipeId, swipeSettling, editingId]);
 
   const onRowTouchEnd = useCallback((m, e) => {
-    // Pannello di modifica o conferma già aperti: un tap (senza
-    // trascinamento) sulla riga li richiude subito, senza aspettare il click
-    // sintetico del browser (che su alcuni mobile richiederebbe un secondo tocco).
-    if (editingId === m.id || confirmDeleteId === m.id || confirmEditId === m.id) {
+    // Conferma elimina già aperta: un tap (senza trascinamento) sulla riga
+    // la richiude subito, senza aspettare il click sintetico del browser.
+    if (confirmDeleteId === m.id) {
       const endX = e?.changedTouches?.[0]?.clientX ?? swipeStartXRef.current;
-      // Non chiudere se il tocco è su un bottone dell'overlay (matita/cestino/X):
+      // Non chiudere se il tocco è su un bottone dell'overlay (cestino/X):
       // altrimenti l'overlay si smonta prima del click e il tap finisce sulla stellina sotto.
       if (e?.target?.closest?.('button')) return;
       if (Math.abs(endX - swipeStartXRef.current) < TAP_MAX_MOVE) {
         suppressRowClickRef.current = true;
-        if (editingId === m.id) closeEdit();
-        else if (confirmDeleteId === m.id) setConfirmDeleteId(null);
-        else setConfirmEditId(null);
+        setConfirmDeleteId(null);
       }
       return;
     }
+    if (swipeSettling) return;
     if (swipeId !== m.id) return;
+
+    // Pannello modifica aperto: stesso swipe sx→dx → reveal + chiudi; tap → chiudi.
+    if (editingId === m.id) {
+      if (e?.target?.closest?.('button')) return;
+      if (swipeX >= SWIPE_TRIGGER) {
+        suppressRowClickRef.current = true;
+        runEditRevealThenClose();
+        return;
+      }
+      const endX = e?.changedTouches?.[0]?.clientX ?? swipeStartXRef.current;
+      if (Math.abs(endX - swipeStartXRef.current) < TAP_MAX_MOVE) {
+        suppressRowClickRef.current = true;
+        closeEdit();
+      }
+      setSwipeX(0);
+      setSwipeId(null);
+      return;
+    }
+
     if (swipeX >= SWIPE_TRIGGER) {
-      setConfirmDeleteId(null);
-      setConfirmEditId(m.id);
-    } else if (swipeX <= -SWIPE_TRIGGER) {
-      setConfirmEditId(null);
+      runEditRevealThenOpen(m);
+      return;
+    }
+    if (swipeX <= -SWIPE_TRIGGER) {
       setConfirmDeleteId(m.id);
     }
     setSwipeX(0);
     setSwipeId(null);
-  }, [swipeId, swipeX, editingId, confirmDeleteId, confirmEditId, closeEdit]);
+  }, [swipeId, swipeX, editingId, confirmDeleteId, closeEdit, swipeSettling, runEditRevealThenOpen, runEditRevealThenClose]);
 
-  // --- Carosello schede Diario | Traccia | Scan (drag + animazione) ---
-  const TAB_SWIPE_MIN = 56;
-  const TAB_SWIPE_RATIO = 0.22;
+  // --- Schede Diario | Traccia | Scan: solo bottoni in cima (niente swipe tab) ---
   const pagerRef = useRef(null);
-  const tabSwipeRef = useRef(null); // { x, y, axis, width }
-  const tabDragXRef = useRef(0);
-  const [tabDragX, setTabDragX] = useState(0);
-  const [tabDragging, setTabDragging] = useState(false);
   const tabIdx = TAB_ORDER.indexOf(view);
 
-  const setTabDrag = useCallback((x) => {
-    tabDragXRef.current = x;
-    setTabDragX(x);
-  }, []);
-
-  const tabSwipeBlocked = useCallback(
-    () => configOpen || targetsOpen || searchOpen || saveCatalogOpen || !!editingId || !!confirmDeleteId || !!confirmEditId || scanState === 'scanning' || dayDragging || dayPendingCommitRef.current != null,
-    [configOpen, targetsOpen, searchOpen, saveCatalogOpen, editingId, confirmDeleteId, confirmEditId, scanState, dayDragging]
-  );
-
-  const isTabSwipeBlockedTarget = (el) =>
-    !!el?.closest?.('input, textarea, button, select, a, [data-no-tab-swipe]');
-
-  const goToTab = useCallback((nextId, fromDrag = false) => {
-    const from = TAB_ORDER.indexOf(view);
-    const to = TAB_ORDER.indexOf(nextId);
-    if (to < 0 || from === to) {
-      setTabDragging(false);
-      setTabDrag(0);
-      return;
-    }
-    if (fromDrag) {
-      const w = tabSwipeRef.current?.width || pagerRef.current?.offsetWidth || 1;
-      const visual = -from * w + tabDragXRef.current;
-      const targetBase = -to * w;
-      setTabDragging(true);
-      setView(nextId);
-      setTabDrag(visual - targetBase);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setTabDragging(false);
-          setTabDrag(0);
-          tabSwipeRef.current = null;
-        });
-      });
-    } else {
-      setTabDragging(false);
-      setTabDrag(0);
-      setView(nextId);
-    }
-  }, [view, setTabDrag]);
-
-  const onTabSwipeStart = useCallback((e) => {
-    if (tabSwipeBlocked() || isTabSwipeBlockedTarget(e.target) || swipeId) {
-      tabSwipeRef.current = null;
-      return;
-    }
-    tabSwipeRef.current = {
-      x: e.touches[0].clientX,
-      y: e.touches[0].clientY,
-      axis: null,
-      width: pagerRef.current?.offsetWidth || 1,
-    };
-  }, [tabSwipeBlocked, swipeId]);
-
-  const onTabSwipeMove = useCallback((e) => {
-    const s = tabSwipeRef.current;
-    if (!s || swipeId) return;
-    const dx = e.touches[0].clientX - s.x;
-    const dy = e.touches[0].clientY - s.y;
-    if (!s.axis) {
-      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
-      s.axis = Math.abs(dx) > Math.abs(dy) * 1.1 ? 'x' : 'y';
-      if (s.axis === 'y') return;
-      setTabDragging(true);
-    }
-    if (s.axis !== 'x') return;
-    const idx = TAB_ORDER.indexOf(view);
-    let x = dx;
-    if ((idx === 0 && x > 0) || (idx === TAB_ORDER.length - 1 && x < 0)) {
-      x *= 0.35;
-    }
-    setTabDrag(x);
-  }, [view, swipeId, setTabDrag]);
-
-  const onTabSwipeEnd = useCallback(() => {
-    const s = tabSwipeRef.current;
-    if (!s || s.axis !== 'x' || swipeId) {
-      tabSwipeRef.current = null;
-      setTabDragging(false);
-      setTabDrag(0);
-      return;
-    }
-    const w = s.width || 1;
-    const dx = tabDragXRef.current;
-    const idx = TAB_ORDER.indexOf(view);
-    const enough = Math.abs(dx) >= Math.max(TAB_SWIPE_MIN, w * TAB_SWIPE_RATIO);
-    let next = view;
-    if (enough && dx < 0 && idx < TAB_ORDER.length - 1) next = TAB_ORDER[idx + 1];
-    else if (enough && dx > 0 && idx > 0) next = TAB_ORDER[idx - 1];
-    if (next !== view) goToTab(next, true);
-    else {
-      setTabDragging(false);
-      setTabDrag(0);
-      tabSwipeRef.current = null;
-    }
-  }, [view, swipeId, goToTab, setTabDrag]);
+  const goToTab = useCallback((nextId) => {
+    if (TAB_ORDER.indexOf(nextId) < 0 || nextId === view) return;
+    setView(nextId);
+  }, [view]);
 
   const totals = useMemo(() => sumTotals(displayedMeals), [displayedMeals]);
   const grouped = useMemo(() => groupByPasto(displayedMeals), [displayedMeals]);
@@ -2971,7 +3223,7 @@ export default function VoiceTrackDashboard() {
           </div>
         )}
 
-        {/* Carosello schede: swipe a tutta altezza, le altre spuntano dal lato */}
+        {/* Carosello schede: cambio tab solo dai bottoni in cima (niente swipe). */}
         <div
           ref={pagerRef}
             style={{
@@ -2984,17 +3236,13 @@ export default function VoiceTrackDashboard() {
             width: 'calc(100% + 32px)',
             alignSelf: 'stretch',
           }}
-          onTouchStart={onTabSwipeStart}
-          onTouchMove={onTabSwipeMove}
-          onTouchEnd={onTabSwipeEnd}
-          onTouchCancel={onTabSwipeEnd}
         >
           <div
             style={{
               display: 'flex',
               width: '100%',
-              transform: `translateX(calc(${-Math.max(tabIdx, 0) * 100}% + ${tabDragX}px))`,
-              transition: tabDragging ? 'none' : 'transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1)',
+              transform: `translateX(${-Math.max(tabIdx, 0) * 100}%)`,
+              transition: 'transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1)',
               willChange: 'transform',
             }}
           >
@@ -3008,14 +3256,18 @@ export default function VoiceTrackDashboard() {
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
-                pointerEvents: view === 'diario' || tabDragging ? 'auto' : 'none',
+                pointerEvents: view === 'diario' ? 'auto' : 'none',
               }}
               aria-hidden={view !== 'diario'}
             >
-        {/* Carosello giorno: 3 slot (ieri | oggi | domani). Gesto solo sulla card calorie.
-            Trend resta fuori così non scorre con il giorno. */}
+        {/* Carosello giorno: 3 slot (ieri | oggi | domani). Swipe a tutta larghezza
+            (fold + pasti); Trend resta fuori così non scorre con il giorno. */}
         <div
           ref={dayPagerRef}
+          onTouchStart={onDaySwipeStart}
+          onTouchMove={onDaySwipeMove}
+          onTouchEnd={onDaySwipeEnd}
+          onTouchCancel={onDaySwipeEnd}
           style={{
             overflow: 'hidden',
             overflowX: 'clip',
@@ -3023,6 +3275,7 @@ export default function VoiceTrackDashboard() {
             maxWidth: '100%',
             minWidth: 0,
             alignSelf: 'stretch',
+            touchAction: 'pan-y',
           }}
         >
           <div
@@ -3065,13 +3318,8 @@ export default function VoiceTrackDashboard() {
           }}
         >
         {/* Hero: tre slot fissi — data | medio (readout / Obiettivi) | gauge.
-            Swipe orizzontale qui cambia giorno (non le tab: data-no-tab-swipe). */}
+            Swipe giorno: sul dayPager (sopra), non solo qui. */}
         <div
-          data-no-tab-swipe
-          onTouchStart={onDaySwipeStart}
-          onTouchMove={onDaySwipeMove}
-          onTouchEnd={onDaySwipeEnd}
-          onTouchCancel={onDaySwipeEnd}
           style={{
             background: daySurface(dayOffset),
             border: `1px solid ${dayLine(dayOffset)}`,
@@ -3084,7 +3332,6 @@ export default function VoiceTrackDashboard() {
             overflow: 'hidden',
             overflowY: targetsMounted ? 'hidden' : undefined,
             boxSizing: 'border-box',
-            touchAction: 'pan-y',
           }}
         >
           {/* Slot data: nascosto con Obiettivi aperto; torna insieme ad azioni (gate targetsAnimOpen). */}
@@ -3112,12 +3359,34 @@ export default function VoiceTrackDashboard() {
               >
                 <ChevronLeft size={22} />
               </button>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', minWidth: 0 }}>
+                <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {diaryDayTitle(dayOffset, selectedDate)}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setDiaryCalOpen((o) => !o)}
+                  aria-label="Calendario"
+                  aria-expanded={diaryCalOpen}
+                  style={{
+                    background: diaryCalOpen ? C.surfaceRaised : 'transparent',
+                    border: `1px solid ${diaryCalOpen ? C.good : dayLine(dayOffset)}`,
+                    color: diaryCalOpen ? C.good : C.inkMuted,
+                    borderRadius: '6px',
+                    width: '26px',
+                    height: '26px',
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  <Calendar size={13} />
+                </button>
                 {dayOffset !== 0 && (
-                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer' }}>
+                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', flexShrink: 0 }}>
                     {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
                   </button>
                 )}
@@ -3132,6 +3401,21 @@ export default function VoiceTrackDashboard() {
               </button>
             </div>
           </div>
+          {diaryCalOpen && !(targetsOpen || targetsAnimOpen) && (
+            <div data-no-day-swipe style={{ flexShrink: 0, marginTop: '8px', marginBottom: '4px' }}>
+              <DayJumpCalendar
+                selectedStr={selectedDateStr}
+                mode={diaryCalMode}
+                onModeChange={setDiaryCalMode}
+                onSelect={(ymd) => {
+                  goToDate(ymd);
+                  setDiaryCalOpen(false);
+                }}
+                onClose={() => setDiaryCalOpen(false)}
+                line={dayLine(dayOffset)}
+              />
+            </div>
+          )}
 
           {/* Slot medio: readout centrato; editor absolute a tutta altezza dello slot */}
           <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
@@ -3163,7 +3447,7 @@ export default function VoiceTrackDashboard() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => { setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
+                  onClick={() => { setDiaryCalOpen(false); setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
                   style={{
                     color: C.inkMuted,
                     background: C.surfaceRaised,
@@ -3425,19 +3709,19 @@ export default function VoiceTrackDashboard() {
                         editable={isEditable(m)}
                         isEditing={editingId === m.id}
                         confirming={confirmDeleteId === m.id}
-                        confirmingEdit={confirmEditId === m.id}
                         active={swipeId === m.id}
+                        settling={swipeSettling && swipeId === m.id}
                         swipeX={swipeId === m.id ? swipeX : 0}
                         editDraft={editDraft}
                         setEditDraft={setEditDraft}
+                        onGrammiChange={onEditGrammiChange}
                         editBusy={editBusy}
                         editError={editError}
                         onOpenEdit={openEdit}
                         onCloseEdit={closeEdit}
                         onSave={saveEdit}
-                        onAskDelete={(id) => { setConfirmEditId(null); setConfirmDeleteId(id); }}
+                        onAskDelete={(id) => { setConfirmDeleteId(id); }}
                         onCancelDelete={() => { setConfirmDeleteId(null); setSwipeId(null); setSwipeX(0); }}
-                        onCancelEditConfirm={() => { setConfirmEditId(null); setSwipeId(null); setSwipeX(0); }}
                         onDelete={deleteMeal}
                         onTouchStart={onRowTouchStart}
                         onTouchMove={onRowTouchMove}
@@ -3446,6 +3730,8 @@ export default function VoiceTrackDashboard() {
                         onCatalogStar={config.apiUrl ? onMealCatalogStarClick : undefined}
                         catalogStarFilled={!!catEntry?.preferito}
                         catalogStarBusy={!!catEntry?.id && catalogStarBusyId === catEntry.id}
+                        surface={daySurface(dayOffset)}
+                        line={dayLine(dayOffset)}
                       />
                     );
                   })}
@@ -3454,6 +3740,10 @@ export default function VoiceTrackDashboard() {
             </div>
           )}
         </div>
+        {/* Spazio scroll sopra la tastiera mentre il pannello edit è aperto. */}
+        {keyboardInset > 0 && (
+          <div style={{ height: keyboardInset, flexShrink: 0 }} aria-hidden />
+        )}
             </div>
             <div style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
               {dayOffset < 0 ? (
@@ -3551,7 +3841,7 @@ export default function VoiceTrackDashboard() {
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
-                pointerEvents: view === 'traccia' || tabDragging ? 'auto' : 'none',
+                pointerEvents: view === 'traccia' ? 'auto' : 'none',
               }}
               aria-hidden={view !== 'traccia'}
             >
@@ -3727,7 +4017,7 @@ export default function VoiceTrackDashboard() {
                 minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
                 padding: '0 16px',
                 boxSizing: 'border-box',
-                pointerEvents: view === 'scan' || tabDragging ? 'auto' : 'none',
+                pointerEvents: view === 'scan' ? 'auto' : 'none',
               }}
               aria-hidden={view !== 'scan'}
             >
@@ -3797,6 +4087,45 @@ export default function VoiceTrackDashboard() {
                 </>
               )}
             </div>
+
+            {/* Link scheda Open Food Facts: sotto Inquadra, prima dell'EAN a mano. */}
+            {config.apiUrl && scanState !== 'scanning' && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '14px 20px' }} className="flex flex-col gap-2">
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '11px', color: C.inkMuted, letterSpacing: '0.06em', textAlign: 'center', width: '100%' }}>
+                  LINK OPEN FOOD FACTS
+                </span>
+                <div className="flex items-center w-full" style={{ gap: '8px' }}>
+                  <input
+                    type="url"
+                    inputMode="url"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={offLink}
+                    onChange={(e) => setOffLink(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') submitOffLink(); }}
+                    disabled={scanState !== 'idle'}
+                    placeholder="https://…openfoodfacts.org/product/…"
+                    style={{ flex: 1, background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '8px', padding: '10px 12px', fontSize: '14px', fontFamily: "'IBM Plex Mono', monospace", opacity: scanState !== 'idle' ? 0.5 : 1 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={submitOffLink}
+                    disabled={scanState !== 'idle' || !offLink.trim()}
+                    aria-label="Cerca prodotto dal link Open Food Facts"
+                    style={{
+                      background: scanState === 'idle' && offLink.trim() ? C.good : C.surfaceRaised,
+                      color: scanState === 'idle' && offLink.trim() ? C.bg : C.inkFaint,
+                      border: `1px solid ${C.line}`, borderRadius: '8px', padding: '10px 12px',
+                      cursor: scanState === 'idle' && offLink.trim() ? 'pointer' : 'default',
+                      display: 'flex', alignItems: 'center',
+                    }}
+                  >
+                    <Check size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Inserimento manuale EAN: alternativa alla fotocamera e correzione
                 per quando lo scan legge un codice sbagliato (§ segnalazione utente). */}
@@ -3876,6 +4205,71 @@ export default function VoiceTrackDashboard() {
                     </span>
                   )}
                 </div>
+                {/* Giorno del log: Ieri / Oggi / Domani + calendario */}
+                <div className="flex items-center" style={{ gap: '6px', flexWrap: 'wrap' }}>
+                  {[
+                    { label: 'Ieri', ymd: fmtYMD(dateForOffset(-1)) },
+                    { label: 'Oggi', ymd: fmtYMD(dateForOffset(0)) },
+                    { label: 'Domani', ymd: fmtYMD(dateForOffset(1)) },
+                  ].map((opt) => {
+                    const selected = (scanLogDate || '') === opt.ymd;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        disabled={scanState !== 'asking_qty'}
+                        onClick={() => setScanLogDateChoice(opt.ymd)}
+                        style={{
+                          background: selected ? C.good : C.surfaceRaised,
+                          color: selected ? C.bg : C.inkMuted,
+                          border: `1px solid ${selected ? C.good : C.line}`,
+                          borderRadius: '6px',
+                          padding: '5px 10px',
+                          fontSize: '12px',
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          cursor: scanState === 'asking_qty' ? 'pointer' : 'default',
+                          opacity: scanState !== 'asking_qty' ? 0.5 : 1,
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    disabled={scanState !== 'asking_qty'}
+                    onClick={() => setScanCalOpen((o) => !o)}
+                    aria-label="Scegli data"
+                    aria-expanded={scanCalOpen}
+                    style={{
+                      background: scanCalOpen ? C.surfaceRaised : 'transparent',
+                      color: scanCalOpen ? C.good : C.inkMuted,
+                      border: `1px solid ${scanCalOpen ? C.good : C.line}`,
+                      borderRadius: '6px',
+                      width: '32px',
+                      height: '32px',
+                      padding: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: scanState === 'asking_qty' ? 'pointer' : 'default',
+                      opacity: scanState !== 'asking_qty' ? 0.5 : 1,
+                    }}
+                  >
+                    <Calendar size={14} />
+                  </button>
+                </div>
+                {scanCalOpen && scanState === 'asking_qty' && (
+                  <DayJumpCalendar
+                    selectedStr={scanLogDate || fmtYMD(new Date())}
+                    mode="month"
+                    onModeChange={() => {}}
+                    showModeToggle={false}
+                    onSelect={setScanLogDateChoice}
+                    onClose={() => setScanCalOpen(false)}
+                    line={C.line}
+                  />
+                )}
                 <div className="flex items-center w-full" style={{ gap: '8px' }}>
                   <input
                     type="number"
@@ -4417,24 +4811,20 @@ export default function VoiceTrackDashboard() {
 }
 
 // ---------------------------------------------------------------------------
-// Riga pasto con edit/delete (Deploy 5 §7.2).
-// - tap sulla riga con pannello aperto → chiude modifica o conferma eliminazione
-// - swipe sx→dx → modifica
-// - swipe dx→sx → box di conferma eliminazione
-// - pulsante Elimina nel pannello → stesso box di conferma
 // MealRow — riga pasto con swipe e pannello modifica inline.
-// - tap sulla riga con pannello aperto → chiude modifica o conferma
-// - swipe sx→dx → barra conferma modifica (verde) → matita apre pannello
+// - swipe sx→dx → barra verde + apre subito il pannello edit (niente matita/X)
 // - swipe dx→sx → barra conferma eliminazione (rossa)
-// - pulsante Elimina nel pannello → stesso box di conferma elimina
+// - tap riga con pannello/conferma aperti → chiude
+// - grammi nel pannello: riscala kcal/P/C/G da baseline (onGrammiChange)
 // Le righe non editabili (demo o storiche "legacy-*") restano di sola lettura.
 // ---------------------------------------------------------------------------
 function MealRow({
-  meal, editable, isEditing, confirming, confirmingEdit, active, swipeX,
-  editDraft, setEditDraft, editBusy, editError,
-  onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onCancelEditConfirm, onDelete,
+  meal, editable, isEditing, confirming, active, settling = false, swipeX,
+  editDraft, setEditDraft, onGrammiChange, editBusy, editError,
+  onOpenEdit, onCloseEdit, onSave, onAskDelete, onCancelDelete, onDelete,
   onTouchStart, onTouchMove, onTouchEnd, onCatalogStar, catalogStarFilled, catalogStarBusy,
   suppressClickRef,
+  surface = C.surface, line = C.line,
 }) {
   const fonteLabel = String(meal.fonte || '').includes('barcode')
     ? 'barcode'
@@ -4447,14 +4837,9 @@ function MealRow({
   const OVERLAY_MS = 320;
   const [deleteMounted, setDeleteMounted] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [editMounted, setEditMounted] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
   const deleteMountedRef = useRef(false);
-  const editMountedRef = useRef(false);
   const deleteExitTimerRef = useRef(null);
-  const editExitTimerRef = useRef(null);
   deleteMountedRef.current = deleteMounted;
-  editMountedRef.current = editMounted;
 
   useEffect(() => {
     if (deleteExitTimerRef.current) {
@@ -4462,14 +4847,6 @@ function MealRow({
       deleteExitTimerRef.current = null;
     }
     if (confirming) {
-      // Chiudi subito l'overlay opposto se ancora montato, per evitare che
-      // le due animazioni (uscita edit + entrata delete) si sovrappongano.
-      if (editExitTimerRef.current) {
-        clearTimeout(editExitTimerRef.current);
-        editExitTimerRef.current = null;
-      }
-      setEditOpen(false);
-      setEditMounted(false);
       setDeleteMounted(true);
       const raf = requestAnimationFrame(() => {
         requestAnimationFrame(() => setDeleteOpen(true));
@@ -4491,42 +4868,7 @@ function MealRow({
     };
   }, [confirming]);
 
-  useEffect(() => {
-    if (editExitTimerRef.current) {
-      clearTimeout(editExitTimerRef.current);
-      editExitTimerRef.current = null;
-    }
-    if (confirmingEdit) {
-      // Chiudi subito l'overlay opposto se ancora montato, per evitare che
-      // le due animazioni (uscita delete + entrata edit) si sovrappongano.
-      if (deleteExitTimerRef.current) {
-        clearTimeout(deleteExitTimerRef.current);
-        deleteExitTimerRef.current = null;
-      }
-      setDeleteOpen(false);
-      setDeleteMounted(false);
-      setEditMounted(true);
-      const raf = requestAnimationFrame(() => {
-        requestAnimationFrame(() => setEditOpen(true));
-      });
-      return () => cancelAnimationFrame(raf);
-    }
-    if (editMountedRef.current) {
-      setEditOpen(false);
-      editExitTimerRef.current = setTimeout(() => {
-        setEditMounted(false);
-        editExitTimerRef.current = null;
-      }, OVERLAY_MS);
-    }
-    return () => {
-      if (editExitTimerRef.current) {
-        clearTimeout(editExitTimerRef.current);
-        editExitTimerRef.current = null;
-      }
-    };
-  }, [confirmingEdit]);
-
-  const overlayBusy = deleteMounted || editMounted;
+  const overlayBusy = deleteMounted;
   const handleRowClick = () => {
     if (suppressClickRef?.current) {
       suppressClickRef.current = false;
@@ -4539,10 +4881,6 @@ function MealRow({
     }
     if (confirming) {
       onCancelDelete();
-      return;
-    }
-    if (confirmingEdit) {
-      onCancelEditConfirm();
       return;
     }
     // Tap semplice: non apre il pannello (solo matita / swipe modifica)
@@ -4593,25 +4931,21 @@ function MealRow({
 
   const shownDraft = (wantPanel ? editDraft : draftSnap) || draftSnap;
 
-  const forwardTouch = editable && !(overlayBusy && !confirming && !confirmingEdit);
+  const forwardTouch = editable && !(overlayBusy && !confirming);
 
   return (
-    <div style={{ borderTop: `1px solid ${C.line}` }}>
+    <div style={{ borderTop: `1px solid ${line}` }}>
       {/* Riga con swipe */}
       <div style={{ position: 'relative', overflow: 'hidden' }}>
-        {/* Pulsante modifica rivelato sotto durante swipe sx→dx */}
+        {/* Barra verde sotto durante swipe sx→dx (apre edit al rilascio) */}
         {editable && !overlayBusy && (
-          <button
-            onClick={() => onOpenEdit(meal)}
-            aria-label="Modifica"
+          <div
+            aria-hidden
             style={{
               position: 'absolute', top: 0, left: 0, bottom: 0, width: '80px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: C.good, color: C.bg, border: 'none', cursor: 'pointer',
+              background: C.good,
             }}
-          >
-            <Pencil size={18} />
-          </button>
+          />
         )}
         {/* Pulsante elimina rivelato sotto durante swipe dx→sx */}
         {editable && !overlayBusy && (
@@ -4627,9 +4961,10 @@ function MealRow({
             <Trash2 size={18} />
           </button>
         )}
-        {/* Contenuto riga (sopra) — in conferma overlay a stessa altezza */}
+        {/* Contenuto riga (sopra) — in conferma overlay a stessa altezza.
+            Sfondo opaco = colore scheda giorno (non transparent: copre i pulsanti swipe). */}
         <div
-          data-no-tab-swipe
+          data-no-day-swipe
           onTouchStart={forwardTouch ? (e) => { e.stopPropagation(); onTouchStart(meal, e); } : undefined}
           onTouchMove={forwardTouch ? (e) => { e.stopPropagation(); onTouchMove(meal, e); } : undefined}
           onTouchEnd={forwardTouch ? (e) => { e.stopPropagation(); onTouchEnd(meal, e); } : undefined}
@@ -4639,11 +4974,13 @@ function MealRow({
             flexDirection: 'column',
             gap: '3px',
             padding: '8px 0',
-            background: C.surface,
+            background: surface,
             position: 'relative',
             paddingRight: editable && !isEditing && !overlayBusy ? (onCatalogStar ? '78px' : '42px') : 0,
-            transform: (overlayBusy || confirming || confirmingEdit) ? 'translateX(0)' : `translateX(${swipeX}px)`,
-            transition: (active || confirming || confirmingEdit || overlayBusy) ? 'none' : 'transform 0.18s ease',
+            transform: (overlayBusy || confirming) ? 'translateX(0)' : `translateX(${swipeX}px)`,
+            transition: ((active && !settling) || confirming || overlayBusy)
+              ? 'none'
+              : 'transform 0.2s cubic-bezier(0.22, 1.2, 0.36, 1)',
             cursor: editable ? 'pointer' : 'default',
           }}
         >
@@ -4696,7 +5033,7 @@ function MealRow({
                     height: '32px',
                     padding: 0,
                     background: C.surfaceRaised,
-                    border: `1px solid ${C.line}`,
+                    border: `1px solid ${line}`,
                     borderRadius: '8px',
                     color: C.amber,
                     cursor: catalogStarBusy ? 'default' : 'pointer',
@@ -4719,7 +5056,7 @@ function MealRow({
                   height: '32px',
                   padding: 0,
                   background: C.surfaceRaised,
-                  border: `1px solid ${C.line}`,
+                  border: `1px solid ${line}`,
                   borderRadius: '8px',
                   color: C.inkMuted,
                   cursor: 'pointer',
@@ -4728,94 +5065,6 @@ function MealRow({
               >
                 <Pencil size={15} />
               </button>
-            </div>
-          )}
-          {editMounted && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                overflow: 'hidden',
-                pointerEvents: editOpen && confirmingEdit ? 'auto' : 'none',
-              }}
-            >
-              <div
-                className={`vt-edit-confirm-fill${editOpen ? ' is-open' : ''}`}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  background: C.good,
-                }}
-              />
-              <div
-                className={`vt-edit-confirm-content${editOpen ? ' is-open' : ''}`}
-                style={{
-                  position: 'relative',
-                  zIndex: 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '8px',
-                  padding: '0 10px',
-                  height: '100%',
-                }}
-              >
-                <span style={{
-                  fontSize: '13px', color: C.bg, fontWeight: 500, lineHeight: 1.3,
-                  minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                }}>
-                  {meal.alimento}
-                </span>
-                <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
-                  <button
-                    type="button"
-                    aria-label="Modifica"
-                    onTouchStart={(e) => e.stopPropagation()}
-                    onTouchEnd={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); onOpenEdit(meal); }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      width: '36px',
-                      height: '36px',
-                      padding: 0,
-                      background: C.bg,
-                      color: C.good,
-                      border: 'none',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <Pencil size={18} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Annulla"
-                    onTouchStart={(e) => e.stopPropagation()}
-                    onTouchEnd={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); onCancelEditConfirm(); }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      width: '36px',
-                      height: '36px',
-                      padding: 0,
-                      background: 'transparent',
-                      color: C.bg,
-                      border: `1px solid ${C.bg}`,
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      flexShrink: 0,
-                      opacity: 0.9,
-                    }}
-                  >
-                    <X size={18} />
-                  </button>
-                </div>
-              </div>
             </div>
           )}
           {deleteMounted && (
@@ -4927,16 +5176,23 @@ function MealRow({
           }}
         >
           <div className="vt-edit-collapse-inner" style={{ pointerEvents: wantPanel && panelOpen ? 'auto' : 'none' }}>
-            <div style={{ background: C.surfaceRaised, border: `1px solid ${C.line}`, borderRadius: '10px', padding: '12px', margin: '8px 0' }} className="flex flex-col gap-2">
+            <div
+              data-vt-edit-panel
+              onFocusCapture={(e) => {
+                if (e.target?.tagName === 'INPUT') scheduleEnsureEditFieldVisible(e.target);
+              }}
+              style={{ background: C.surfaceRaised, border: `1px solid ${line}`, borderRadius: '10px', padding: '12px', margin: '8px 0' }}
+              className="flex flex-col gap-2"
+            >
               <div className="flex flex-col gap-1">
                 <label style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: '0.06em' }}>ALIMENTO</label>
                 <input
                   value={shownDraft.alimento}
                   onChange={(e) => setField('alimento', e.target.value)}
-                  style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}
+                  style={{ background: C.bg, border: `1px solid ${line}`, color: C.ink, borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}
                 />
               </div>
-              <TargetInput label="Grammi" unit="g" value={shownDraft.grammi} onChange={(v) => setField('grammi', v)} color={C.ink} />
+              <TargetInput label="Grammi" unit="g" value={shownDraft.grammi} onChange={(v) => (onGrammiChange ? onGrammiChange(v) : setField('grammi', v))} color={C.ink} />
               <TargetInput label="Calorie" unit="kcal" value={shownDraft.kcal} onChange={(v) => setField('kcal', v)} color={C.ink} />
               <TargetInput label="Proteine" unit="g" value={shownDraft.proteine} onChange={(v) => setField('proteine', v)} color={C.protein} />
               <TargetInput label="Carboidrati" unit="g" value={shownDraft.carboidrati} onChange={(v) => setField('carboidrati', v)} color={C.carbs} />
@@ -4953,7 +5209,7 @@ function MealRow({
                 <button onClick={() => onAskDelete(meal.id)} disabled={editBusy} style={{ background: 'transparent', color: C.alert, border: `1px solid ${C.alert}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: editBusy ? 'default' : 'pointer' }} className="flex items-center gap-1">
                   <Trash2 size={14} /> Elimina
                 </button>
-                <button onClick={onCloseEdit} disabled={editBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer', marginLeft: 'auto' }}>
+                <button onClick={onCloseEdit} disabled={editBusy} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${line}`, borderRadius: '6px', padding: '7px 12px', fontSize: '13px', cursor: 'pointer', marginLeft: 'auto' }}>
                   Annulla
                 </button>
               </div>
@@ -4961,6 +5217,197 @@ function MealRow({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function DayJumpCalendar({
+  selectedStr,
+  mode = 'month',
+  onModeChange,
+  onSelect,
+  onClose,
+  line = C.line,
+  showModeToggle = true,
+}) {
+  const MONTH_IT = [
+    'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+    'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
+  ];
+  const selected = parseYMD(selectedStr);
+  const todayStr = fmtYMD(new Date());
+  const [cursor, setCursor] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
+
+  useEffect(() => {
+    const d = parseYMD(selectedStr);
+    if (mode === 'week') {
+      const start = new Date(d);
+      const monOffset = (start.getDay() + 6) % 7;
+      start.setDate(start.getDate() - monOffset);
+      setCursor(start);
+    } else {
+      setCursor(new Date(d.getFullYear(), d.getMonth(), 1));
+    }
+  }, [selectedStr, mode]);
+
+  const shift = (dir) => {
+    const next = new Date(cursor);
+    if (mode === 'week') next.setDate(next.getDate() + dir * 7);
+    else next.setMonth(next.getMonth() + dir);
+    setCursor(next);
+  };
+
+  const cells = useMemo(() => {
+    if (mode === 'week') {
+      const start = new Date(cursor);
+      const monOffset = (start.getDay() + 6) % 7;
+      start.setDate(start.getDate() - monOffset);
+      return Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(start);
+        d.setDate(start.getDate() + i);
+        return d;
+      });
+    }
+    const y = cursor.getFullYear();
+    const m = cursor.getMonth();
+    const first = new Date(y, m, 1);
+    const startPad = (first.getDay() + 6) % 7;
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const out = [];
+    for (let i = 0; i < startPad; i++) out.push(null);
+    for (let day = 1; day <= daysInMonth; day++) out.push(new Date(y, m, day));
+    while (out.length % 7 !== 0) out.push(null);
+    return out;
+  }, [cursor, mode]);
+
+  const title = mode === 'week'
+    ? (() => {
+        const start = new Date(cursor);
+        const monOffset = (start.getDay() + 6) % 7;
+        start.setDate(start.getDate() - monOffset);
+        const end = new Date(start);
+        end.setDate(start.getDate() + 6);
+        const sameMonth = start.getMonth() === end.getMonth();
+        if (sameMonth) {
+          return `${start.getDate()}–${end.getDate()} ${MONTH_IT[start.getMonth()]} ${start.getFullYear()}`;
+        }
+        return `${start.getDate()} ${MONTH_IT[start.getMonth()].slice(0, 3)} – ${end.getDate()} ${MONTH_IT[end.getMonth()].slice(0, 3)}`;
+      })()
+    : `${MONTH_IT[cursor.getMonth()]} ${cursor.getFullYear()}`;
+
+  const cellBtn = (d) => {
+    if (!d) {
+      return <div key={`e-${Math.random()}`} style={{ aspectRatio: '1', minHeight: '28px' }} />;
+    }
+    const ymd = fmtYMD(d);
+    const isSel = ymd === selectedStr;
+    const isToday = ymd === todayStr;
+    const inMonth = mode === 'week' || d.getMonth() === cursor.getMonth();
+    return (
+      <button
+        key={ymd}
+        type="button"
+        onClick={() => onSelect?.(ymd)}
+        style={{
+          aspectRatio: '1',
+          minHeight: '28px',
+          borderRadius: '8px',
+          border: isToday && !isSel ? `1px solid ${C.good}` : '1px solid transparent',
+          background: isSel ? C.good : 'transparent',
+          color: isSel ? C.bg : (inMonth ? C.ink : C.inkFaint),
+          fontSize: '12px',
+          fontFamily: "'IBM Plex Mono', monospace",
+          cursor: 'pointer',
+          padding: 0,
+        }}
+      >
+        {d.getDate()}
+      </button>
+    );
+  };
+
+  return (
+    <div
+      style={{
+        background: C.surfaceRaised,
+        border: `1px solid ${line}`,
+        borderRadius: '10px',
+        padding: '10px 12px',
+      }}
+      className="flex flex-col gap-2"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => shift(-1)}
+          aria-label="Precedente"
+          style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
+        >
+          <ChevronLeft size={18} />
+        </button>
+        <span style={{ fontSize: '12px', color: C.ink, fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center', flex: 1 }}>
+          {title}
+        </span>
+        <button
+          type="button"
+          onClick={() => shift(1)}
+          aria-label="Successivo"
+          style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
+        >
+          <ChevronRight size={18} />
+        </button>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Chiudi calendario"
+            style={{ background: 'transparent', border: 'none', color: C.inkFaint, padding: '4px', cursor: 'pointer', display: 'flex' }}
+          >
+            <X size={16} />
+          </button>
+        )}
+      </div>
+      {showModeToggle && (
+        <div className="flex items-center gap-1" style={{ justifyContent: 'center' }}>
+          {['week', 'month'].map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => onModeChange?.(m)}
+              style={{
+                background: mode === m ? C.good : 'transparent',
+                color: mode === m ? C.bg : C.inkMuted,
+                border: `1px solid ${mode === m ? C.good : line}`,
+                borderRadius: '6px',
+                padding: '3px 10px',
+                fontSize: '11px',
+                fontFamily: "'IBM Plex Mono', monospace",
+                cursor: 'pointer',
+              }}
+            >
+              {m === 'week' ? 'Settimana' : 'Mese'}
+            </button>
+          ))}
+        </div>
+      )}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(7, 1fr)',
+          gap: '2px',
+          fontSize: '10px',
+          color: C.inkFaint,
+          fontFamily: "'IBM Plex Mono', monospace",
+          textAlign: 'center',
+        }}
+      >
+        {['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'].map((w) => (
+          <div key={w}>{w}</div>
+        ))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' }}>
+        {cells.map((d, i) => (d ? cellBtn(d) : <div key={`pad-${i}`} style={{ aspectRatio: '1', minHeight: '28px' }} />))}
+      </div>
     </div>
   );
 }

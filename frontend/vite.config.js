@@ -40,6 +40,18 @@ export default defineConfig({
             icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }],
           },
         ],
+        // Da OFF «Condividi alimento» (e simili): apre Scan con EAN estratto da url/text.
+        // L'ordine nel foglio Condividi lo decide Android; usare VT qualche volta lo promuove.
+        share_target: {
+          action: '/?action=off',
+          method: 'GET',
+          enctype: 'application/x-www-form-urlencoded',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url',
+          },
+        },
         icons: [
           {
             src: 'pwa-192x192.png',

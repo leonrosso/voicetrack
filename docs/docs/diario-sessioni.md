@@ -14,6 +14,60 @@
 
 ---
 
+## 2026-07-23 — Link OFF in Scan + Share Target (Cursor)
+**Fatto:** (1) sotto la card Inquadra, campo «LINK OPEN FOOD FACTS» per incollare URL scheda OFF (o EAN nudo) → `parseOffBarcode` → stesso flusso `sendBarcode` / `/scan_barcode`. (2) manifest PWA `share_target` GET `/?action=off` (params title/text/url); deep link apre Scan e cerca il prodotto. L’ordine nel foglio Condividi Android non è forzabile: usare VoiceTrack qualche volta lo promuove. Richiede PWA installata + deploy Vercel / aggiornamento SW.
+**Nuove superfici/config:** `parseOffBarcode`; stato `offLink`; `?action=off` + share_target in `vite.config.js`.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera).
+**Prossimo passo:** deploy Vercel; su telefono (PWA installata) — paste link OFF → quantità; da OFF Condividi → VoiceTrack.
+
+---
+
+## 2026-07-23 — Swipe chiusura pannello edit (Cursor)
+**Fatto:** a pannello modifica aperto, sulla riga pasto lo stesso swipe sx→dx (barra verde + peek→bounce ~340ms) richiude il pannello (`runEditRevealThenClose`); tap sulla riga resta chiusura immediata; swipe opposto bloccato mentre si edita.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera).
+**Prossimo passo:** verifica telefono — swipe apre e richiude con stessa animazione; tap/Annulla ok.
+
+---
+
+## 2026-07-23 — Deep link EAN a voce (Cursor)
+**Fatto:** deep link PWA `?action=ean` (alias `ean_voce`, `barcode_voce`) → tab Scan **senza** camera + avvio `listenManualEan` (`kickManualEan`). `?action=scan` resta fotocamera. Tasker Browse URL: `https://voicetrack-chi.vercel.app/?action=ean`.
+**Nuove superfici/config:** query `action=ean` (+ alias); `kickManualEan` / `scanStateRef`.
+**Bug aperti/chiusi:** invariati. Nota: Chrome può richiedere un tap sul mic se Browse URL non conta come user gesture.
+**Prossimo passo:** Tasker profilo/comando → Browse URL; backup Tasker; test telefono + deploy Vercel.
+
+---
+
+## 2026-07-23 — Pannello edit sopra la tastiera (Cursor)
+**Fatto:** digitazione nel pannello modifica pasto: (1) lock `--app-height` mentre `editingId` (`lockAppHeightRef` + `data-vt-lock-app-height` anche nello script `index.html`, così il fold non si schiaccia con la tastiera); (2) `ensureEditFieldVisible` / `scheduleEnsureEditFieldVisible` su focus dei campi (`data-vt-edit-panel` + `visualViewport`); (3) spacer sotto la lista pasti = inset tastiera. Niente autofocus all’apertura; Obiettivi/CERCA/Traccia invariati.
+**Nuove superfici/config:** attr `data-vt-lock-app-height`, `data-vt-edit-panel`; stato `keyboardInset`.
+**Bug aperti/chiusi:** chiuso (codice) campi edit sotto tastiera / fold che collassa. Invariati ml parsing; focus camera.
+**Prossimo passo:** verifica telefono — focus Grammi/Grassi con tastiera; Salva raggiungibile; chiudi edit → fold normale.
+
+---
+
+## 2026-07-23 — Edit pasti + calendari Diario/Scan (Cursor)
+**Fatto:** (1) pannello edit: cambiando i **grammi** riscala kcal/P/C/G dalla baseline di `openEdit` (`new = base * newG/baseG`, 1 decimale; vuoto/0/invalid → non tocca i macro). (2) swipe modifica: barra **verde** + coreografia peek→bounce→apre pannello (~340ms), **senza** conferma matita/X; delete rosso invariato. (3) step «Quanti grammi?» Scan (camera/EAN): chip **Ieri/Oggi/Domani** + calendario; data via `target_date` / `activeLogDateRef` (default giorno Diario). (4) card calorie: icona calendario accanto al titolo giorno → `DayJumpCalendar` con toggle **Settimana/Mese**, tap giorno → `goToDate`.
+**Nuove superfici/config:** componente `DayJumpCalendar`; stato `editBaseline`, `scanLogDate`, `diaryCalOpen`/`diaryCalMode`.
+**Bug aperti/chiusi:** chiuso (codice) conferma intermedia swipe-edit; invariati ml parsing; focus camera.
+**Prossimo passo:** verifica telefono (`npm run dev`) — swipe edit fluido; grammi proporzionali; scan backdate; salto calendario Diario.
+
+---
+
+## 2026-07-23 — Swipe giorno a tutta larghezza (Cursor)
+**Fatto:** swipe orizzontale sul Diario cambia giorno su tutto il `dayPager` (calorie + azioni + macro + pasti), non solo sulla card calorie. Cambio tab Diario/Traccia/Scan **solo** dai bottoni in cima (rimosso swipe tab). Guard: `data-no-day-swipe` + `stopPropagation` sulle righe pasto; blocco con Obiettivi / edit / conferma aperti. Trend resta fuori dal carosello giorno.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati (ml parsing; focus camera).
+**Prossimo passo:** verifica su telefono — swipe fold/pasti = giorno; swipe riga = edit/delete; bottoni tab ok.
+
+---
+
+## 2026-07-23 — Righe pasto colore scheda giorno (Cursor)
+**Fatto:** `MealRow` riceve `surface`/`line` da `daySurface`/`dayLine` (passato caldo / oggi verde / futuro slate). Sfondo riga opaco (non transparent) così lo swipe continua a coprire i pulsanti modifica/elimina. Bordi riga e pannello edit allineati al `line` del giorno.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) righe pasti sempre `C.surface` su schede passate/future. Invariati ml parsing; focus camera.
+**Prossimo passo:** verifica su telefono / Vercel — ieri/domani senza “tessere” grigio-verdi sulle righe.
+
 ## 2026-07-23 — Fold Diario height+grid anti-shrink (Cursor)
 **Fatto:** fold Diario (centro + DayPeek) da `minHeight`+flex a **`height` fissa** + **CSS grid** `1fr / 2fr` (gap 22px). Obiettivi collassa la 2ª riga a `0fr` (transition solo con `targetsMounted`). Elimina il reflow che faceva nascere la scheda calorie grande e restringersi.
 **Nuove superfici/config:** nessuna.

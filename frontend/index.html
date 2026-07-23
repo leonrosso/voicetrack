@@ -7,18 +7,20 @@
     <title>voicetrack-pwa</title>
     <script>
       // Altezza stabile PWA: 100dvh su Android standalone cambia tra cold start e refresh.
+      // Con data-vt-lock-app-height (pannello edit) non seguire la tastiera; orientation sì.
       (function () {
-        function setAppHeight() {
+        function setAppHeight(force) {
+          if (!force && document.documentElement.getAttribute('data-vt-lock-app-height') === '1') return;
           var h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
           document.documentElement.style.setProperty('--app-height', Math.round(h) + 'px');
         }
-        setAppHeight();
-        window.addEventListener('resize', setAppHeight);
-        window.addEventListener('orientationchange', setAppHeight);
-        window.addEventListener('pageshow', setAppHeight);
+        setAppHeight(true);
+        window.addEventListener('resize', function () { setAppHeight(false); });
+        window.addEventListener('orientationchange', function () { setAppHeight(true); });
+        window.addEventListener('pageshow', function () { setAppHeight(true); });
         if (window.visualViewport) {
-          window.visualViewport.addEventListener('resize', setAppHeight);
-          window.visualViewport.addEventListener('scroll', setAppHeight);
+          window.visualViewport.addEventListener('resize', function () { setAppHeight(false); });
+          window.visualViewport.addEventListener('scroll', function () { setAppHeight(false); });
         }
       })();
     </script>
