@@ -593,16 +593,34 @@ function DayPeek({ offset, meals, loading, error, target }) {
           }}
         >
           <div style={{ flexShrink: 0, maxHeight: 40, overflow: 'hidden' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px 26px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
               <div style={{ color: C.inkMuted, padding: '4px', display: 'flex', justifyContent: 'center', width: '32px' }}>
                 <ChevronLeft size={22} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink }}>
+              {/* Colonna fissa come nel centro: niente clip al refresh / mid-swipe. */}
+              <span
+                aria-hidden
+                style={{
+                  background: 'transparent',
+                  border: `1px solid ${line}`,
+                  color: C.inkMuted,
+                  borderRadius: '6px',
+                  width: '26px',
+                  height: '26px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                <Calendar size={13} />
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', minWidth: 0 }}>
+                <span style={{ fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {diaryDayTitle(offset, date)}
                 </span>
                 {offset !== 0 && (
-                  <span style={{ color: C.good, border: `1px solid ${line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px' }}>
+                  <span style={{ color: C.good, border: `1px solid ${line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', flexShrink: 0 }}>
                     {loading ? '…' : 'Oggi'}
                   </span>
                 )}
@@ -2176,7 +2194,7 @@ export default function VoiceTrackDashboard() {
     sendBarcode(code, null);
   }, [offLink, scanState, stopCamera, sendBarcode]);
 
-  /** Da Share Target / ?action=off: tab Scan idle poi sendBarcode (o errore). */
+  /** Da Share Target /share-off o ?action=off: tab Scan idle poi sendBarcode (o errore). */
   const kickOffBarcode = useCallback((code) => {
     stopCamera();
     try { qtyRecRef.current?.abort?.(); } catch (e) {}
@@ -2309,7 +2327,7 @@ export default function VoiceTrackDashboard() {
   // CERCA apre un overlay fisso (non entra nel carosello Traccia).
   // Se siamo già sul tab target, setView è no-op → esegui subito (deep link / re-entry PWA).
   // action=ean → Scan + dettatura EAN (senza camera).
-  // action=off → Scan + barcode da Share Target / link OFF (pendingOffBarcodeRef).
+  // off → Scan + barcode da Share Target / link OFF (pendingOffBarcodeRef).
   const launchQuickAction = useCallback((action) => {
     beginLogFlow();
     if (action === 'cerca') {
@@ -2361,29 +2379,33 @@ export default function VoiceTrackDashboard() {
     }
   }, [view, micState, startListening, startScan, kickManualEan, kickOffBarcode]);
 
-  // Deep link ?action=… (Tasker / shortcuts / Share Target). Pulisce l'URL dopo il consume
+  // Deep link ?action=… / Share Target /share-off. Pulisce l'URL dopo il consume
   // così refresh / swipe-back non ri-triggerano. Re-legge su visibility/pageshow perché
   // la PWA standalone in background spesso non rimonta React.
   const consumeUrlAction = useCallback(() => {
     const params = new URLSearchParams(window.location.search);
+    const path = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
+    const isShareOffPath = path === '/share-off' || path.endsWith('/share-off');
     const raw = params.get('action');
-    if (!raw) return;
+    const shareBlob = [params.get('url'), params.get('text'), params.get('title')]
+      .filter(Boolean)
+      .join('\n');
+    // Share Target (path dedicato) o deep link legacy ?action=off
+    const isOffShare = isShareOffPath || raw === 'off';
 
-    if (raw === 'off') {
-      const blob = [params.get('url'), params.get('text'), params.get('title')]
-        .filter(Boolean)
-        .join('\n');
-      pendingOffBarcodeRef.current = parseOffBarcode(blob) || '';
+    if (isOffShare) {
+      pendingOffBarcodeRef.current = parseOffBarcode(shareBlob) || '';
       params.delete('action');
       params.delete('title');
       params.delete('text');
       params.delete('url');
       const qs = params.toString();
-      const next = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
-      window.history.replaceState(window.history.state, '', next);
+      window.history.replaceState(window.history.state, '', `/${qs ? `?${qs}` : ''}${window.location.hash}`);
       launchQuickAction('off');
       return;
     }
+
+    if (!raw) return;
 
     const map = {
       scan: 'scan',
@@ -3350,7 +3372,7 @@ export default function VoiceTrackDashboard() {
                 : 'none',
             }}
           >
-            <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px 26px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
               <button
                 onClick={() => shiftDay(-1)}
                 disabled={!config.apiUrl}
@@ -3359,32 +3381,32 @@ export default function VoiceTrackDashboard() {
               >
                 <ChevronLeft size={22} />
               </button>
+              <button
+                type="button"
+                onClick={() => setDiaryCalOpen((o) => !o)}
+                aria-label="Calendario"
+                aria-expanded={diaryCalOpen}
+                style={{
+                  background: diaryCalOpen ? C.surfaceRaised : 'transparent',
+                  border: `1px solid ${diaryCalOpen ? C.good : dayLine(dayOffset)}`,
+                  color: diaryCalOpen ? C.good : C.inkMuted,
+                  borderRadius: '6px',
+                  width: '26px',
+                  height: '26px',
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                <Calendar size={13} />
+              </button>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', minWidth: 0 }}>
                 <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {diaryDayTitle(dayOffset, selectedDate)}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setDiaryCalOpen((o) => !o)}
-                  aria-label="Calendario"
-                  aria-expanded={diaryCalOpen}
-                  style={{
-                    background: diaryCalOpen ? C.surfaceRaised : 'transparent',
-                    border: `1px solid ${diaryCalOpen ? C.good : dayLine(dayOffset)}`,
-                    color: diaryCalOpen ? C.good : C.inkMuted,
-                    borderRadius: '6px',
-                    width: '26px',
-                    height: '26px',
-                    padding: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                  }}
-                >
-                  <Calendar size={13} />
-                </button>
                 {dayOffset !== 0 && (
                   <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', flexShrink: 0 }}>
                     {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}

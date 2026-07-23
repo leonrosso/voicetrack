@@ -25,25 +25,46 @@ export default defineConfig({
         background_color: '#121613',
         display: 'standalone',
         orientation: 'portrait',
+        // Scope assoluto: con base './' il plugin metteva scope './' e Android
+        // a volte non registrava share_target.
         start_url: '/',
+        scope: '/',
+        // Pressione lunga icona (WebAPK): stesse azioni rapide del Diario.
+        // Ordine = piano §7.3 Traccia/Scansiona prima, poi Cerca/Testo.
         shortcuts: [
           {
             name: 'Traccia',
             short_name: 'Traccia',
+            description: 'Registra un pasto a voce',
             url: '/?action=voice',
-            icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }],
+            icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
           },
           {
             name: 'Scansiona',
             short_name: 'Scansiona',
+            description: 'Inquadra un codice a barre',
             url: '/?action=scan',
-            icons: [{ src: 'pwa-192x192.png', sizes: '192x192' }],
+            icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
+          },
+          {
+            name: 'Cerca',
+            short_name: 'Cerca',
+            description: 'Cerca nel catalogo o su Open Food Facts',
+            url: '/?action=cerca',
+            icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
+          },
+          {
+            name: 'Testo',
+            short_name: 'Testo',
+            description: 'Registra un pasto digitando',
+            url: '/?action=text',
+            icons: [{ src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
           },
         ],
-        // Da OFF «Condividi alimento» (e simili): apre Scan con EAN estratto da url/text.
-        // L'ordine nel foglio Condividi lo decide Android; usare VT qualche volta lo promuove.
+        // Path senza query nell'action: Chrome/Android spesso ignora share_target
+        // se action contiene già '?…'. Params GET vengono appesi da Android.
         share_target: {
-          action: '/?action=off',
+          action: '/share-off',
           method: 'GET',
           enctype: 'application/x-www-form-urlencoded',
           params: {
@@ -54,17 +75,17 @@ export default defineConfig({
         },
         icons: [
           {
-            src: 'pwa-192x192.png',
+            src: '/pwa-192x192.png',
             sizes: '192x192',
             type: 'image/png',
           },
           {
-            src: 'pwa-512x512.png',
+            src: '/pwa-512x512.png',
             sizes: '512x512',
             type: 'image/png',
           },
           {
-            src: 'pwa-512x512.png',
+            src: '/pwa-512x512.png',
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',

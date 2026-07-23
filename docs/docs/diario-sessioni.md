@@ -14,6 +14,38 @@
 
 ---
 
+## 2026-07-23 — Shortcuts pressione lunga icona (Cursor)
+**Fatto:** manifest PWA `shortcuts` allineati alle azioni rapide (§7.3 + Diario): **Traccia** (`?action=voice`), **Scansiona** (`?action=scan`), **Cerca** (`?action=cerca`), **Testo** (`?action=text`); description + icone path assoluto `/pwa-192x192.png`. Deep link già gestiti da `consumeUrlAction` / `launchQuickAction`.
+**Nuove superfici/config:** 4 shortcuts WebAPK (pressione lunga icona).
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** deploy Vercel → **disinstalla/reinstalla** PWA → pressione lunga icona → 4 azioni.
+
+---
+
+## 2026-07-23 — Calendario visibile subito al refresh (Cursor)
+**Fatto:** icona calendario in colonna griglia fissa (`32px 26px 1fr 32px`) a sinistra della data, fuori dal flex centrato con ellipsis — così non viene clipata da `overflow:hidden` al primo layout/refresh. Stesso layout decorativo su `DayPeek`.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) icona calendario assente al refresh poi compare.
+**Prossimo passo:** verifica telefono — refresh Diario, icona subito visibile.
+
+---
+
+## 2026-07-23 — Calendario a sinistra della data (Cursor)
+**Fatto:** icona calendario sul Diario spostata a sinistra del titolo giorno (prima era a destra).
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy se non già in coda.
+
+---
+
+## 2026-07-23 — Fix Share Target path + scope (Cursor)
+**Fatto:** `share_target.action` da `/?action=off` a **`/share-off`** (senza query: Chrome/Android spesso non registrava il target). Manifest `scope: '/'` esplicito (prima `./` da base relativa). `consumeUrlAction` riconosce path `/share-off` + legacy `?action=off`. Aggiunto `frontend/vercel.json` rewrite SPA così `/share-off` non fa 404.
+**Nuove superfici/config:** path `/share-off`; `vercel.json` rewrites.
+**Bug aperti/chiusi:** Share Target assente dalla lista Condividi (probabile causa action con `?` / scope relativo) — fix codice; serve **disinstallare e reinstallare** la PWA dopo deploy.
+**Prossimo passo:** deploy Vercel → disinstalla VoiceTrack → cancella dati sito → reinstalla → OFF Condividi → VoiceTrack.
+
+---
+
 ## 2026-07-23 — Link OFF in Scan + Share Target (Cursor)
 **Fatto:** (1) sotto la card Inquadra, campo «LINK OPEN FOOD FACTS» per incollare URL scheda OFF (o EAN nudo) → `parseOffBarcode` → stesso flusso `sendBarcode` / `/scan_barcode`. (2) manifest PWA `share_target` GET `/?action=off` (params title/text/url); deep link apre Scan e cerca il prodotto. L’ordine nel foglio Condividi Android non è forzabile: usare VoiceTrack qualche volta lo promuove. Richiede PWA installata + deploy Vercel / aggiornamento SW.
 **Nuove superfici/config:** `parseOffBarcode`; stato `offLink`; `?action=off` + share_target in `vite.config.js`.
