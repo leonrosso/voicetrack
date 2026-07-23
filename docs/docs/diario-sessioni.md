@@ -14,6 +14,62 @@
 
 ---
 
+## 2026-07-23 — Confronto kcal per range (sett/mese/anno) (Cursor)
+**Fatto:** card Statistiche — confronto alto dx segue il toggle: **Settimana** `Σ kcal` vs `target×7`; **Mese** `Σ(avg×7)` vs `target×(n×7)` (5 settimane rolling); **Anno** `Σ(avg×giorniMese)` vs `target×Σgiorni` (mese corrente fino a oggi); caption `sett./mese/anno`; `…` se serie attiva vuota.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy Vercel.
+
+---
+
+## 2026-07-23 — Confronto kcal settimanali in Statistiche (Cursor)
+**Fatto:** card Statistiche Diario — in alto a destra `consumate / obiettivo` settimanale (`sum(storico_settimanale.kcal)` vs `target.kcal × 7`), IBM Plex Mono + hint Restano/Superato (`C.good`/`C.alert`); fisso anche con grafico su Mese/Anno; `…` se serie settimana assente.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy Vercel.
+
+---
+
+## 2026-07-23 — Label kcal sopra barre trend (Cursor)
+**Fatto:** card Statistiche Diario — `LabelList` su `BarChart` con `kcal` arrotondate sopra ogni barra (IBM Plex Mono 9px, `C.inkMuted`); `margin.top` 16 + altezza chart 124px per evitare clip. Vale per Settimana / Mese / Anno.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy Vercel.
+
+---
+
+## 2026-07-23 — Calendario accanto alla data (Cursor)
+**Fatto:** icona calendario nella scheda calorie spostata subito a sinistra del testo data (gap 6px, cluster centrato); allineato anche in DayPeek. Non più a metà tra freccia e data.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy Vercel.
+
+---
+
+## 2026-07-23 — Animazione enter/exit calendario (Cursor)
+**Fatto:** `DayJumpCalendar` — fade scrim + scale/translate pannello (~240ms, ease-out in / ease-in out); chiusura (tap fuori, Escape, X, scelta data) anima l’exit e solo poi chiama `onClose` (parent resta `diaryCalOpen`/`scanCalOpen` true → swipe bloccato). Call site Diario/Scan: `onSelect` non setta più open=false.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono — apri/chiudi calendario Diario e Scan con easing.
+
+---
+
+## 2026-07-23 — Calendario overlay (Cursor)
+**Fatto:** `DayJumpCalendar` non più inline (tagliato da overflow/transform del carosello): overlay fixed a root (Diario + Scan), tap sullo sfondo / Escape / X chiude; pannello centrato a schermo intero.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) calendario Diario tagliato/illeggibile all’apertura.
+**Prossimo passo:** verifica telefono — apri calendario dalla scheda calorie, tap fuori chiude.
+
+---
+
+## 2026-07-23 — Calendario a metà tra freccia e data (Cursor)
+**Fatto:** icona calendario nella scheda calorie riposizionata a metà tra freccia indietro e inizio testo data (layout sandwich flex su centro + DayPeek).
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** invariati.
+**Prossimo passo:** verifica telefono / deploy Vercel.
+
+---
+
 ## 2026-07-23 — Shortcuts pressione lunga icona (Cursor)
 **Fatto:** manifest PWA `shortcuts` allineati alle azioni rapide (§7.3 + Diario): **Traccia** (`?action=voice`), **Scansiona** (`?action=scan`), **Cerca** (`?action=cerca`), **Testo** (`?action=text`); description + icone path assoluto `/pwa-192x192.png`. Deep link già gestiti da `consumeUrlAction` / `launchQuickAction`.
 **Nuove superfici/config:** 4 shortcuts WebAPK (pressione lunga icona).

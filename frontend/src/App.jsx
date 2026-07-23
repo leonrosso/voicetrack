@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
-  BarChart, Bar, XAxis, ReferenceLine
+  BarChart, Bar, XAxis, ReferenceLine, LabelList
 } from 'recharts';
 
 // ---------------------------------------------------------------------------
@@ -593,37 +593,41 @@ function DayPeek({ offset, meals, loading, error, target }) {
           }}
         >
           <div style={{ flexShrink: 0, maxHeight: 40, overflow: 'hidden' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '32px 26px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
               <div style={{ color: C.inkMuted, padding: '4px', display: 'flex', justifyContent: 'center', width: '32px' }}>
                 <ChevronLeft size={22} />
               </div>
-              {/* Colonna fissa come nel centro: niente clip al refresh / mid-swipe. */}
-              <span
-                aria-hidden
-                style={{
-                  background: 'transparent',
-                  border: `1px solid ${line}`,
-                  color: C.inkMuted,
-                  borderRadius: '6px',
-                  width: '26px',
-                  height: '26px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                }}
-              >
-                <Calendar size={13} />
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', minWidth: 0 }}>
-                <span style={{ fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {diaryDayTitle(offset, date)}
-                </span>
-                {offset !== 0 && (
-                  <span style={{ color: C.good, border: `1px solid ${line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', flexShrink: 0 }}>
-                    {loading ? '…' : 'Oggi'}
+              {/* Calendario subito prima del testo data (cluster centrato). */}
+              <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, width: '100%' }}>
+                <div style={{ flex: 1, minWidth: 0 }} aria-hidden />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexShrink: 1 }}>
+                  <span
+                    aria-hidden
+                    style={{
+                      background: 'transparent',
+                      border: `1px solid ${line}`,
+                      color: C.inkMuted,
+                      borderRadius: '6px',
+                      width: '26px',
+                      height: '26px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Calendar size={13} />
                   </span>
-                )}
+                  <span style={{ fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {diaryDayTitle(offset, date)}
+                  </span>
+                  {offset !== 0 && (
+                    <span style={{ color: C.good, border: `1px solid ${line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', flexShrink: 0 }}>
+                      {loading ? '…' : 'Oggi'}
+                    </span>
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }} aria-hidden />
               </div>
               <div style={{ color: C.inkMuted, padding: '4px', display: 'flex', justifyContent: 'center', width: '32px' }}>
                 <ChevronRight size={22} />
@@ -2553,6 +2557,51 @@ export default function VoiceTrackDashboard() {
 
   const trendData = trendRange === 'year' ? year : trendRange === 'month' ? month : week;
 
+  // Confronto consumate / obiettivo in alto a destra: segue il range attivo.
+  // Settimana: barre = kcal giornaliere → Σ vs target×7.
+  // Mese: barre = media giornaliera su bucket da 7gg → Σ(avg×7) vs target×(n×7).
+  // Anno: barre = media giornaliera del mese → Σ(avg×giorniMese) vs target×Σgiorni
+  //   (mese corrente: solo giorni fino a oggi).
+  const dailyTarget = toNum(target?.kcal);
+  const rangeReady = Array.isArray(trendData) && trendData.length > 0;
+  let rangeGoal = 0;
+  let rangeActual = null;
+  if (trendRange === 'week') {
+    rangeGoal = Math.round(dailyTarget * (rangeReady ? trendData.length : 7));
+    rangeActual = rangeReady
+      ? Math.round(trendData.reduce((s, d) => s + toNum(d?.kcal), 0))
+      : null;
+  } else if (trendRange === 'month') {
+    const nWeeks = rangeReady ? trendData.length : 5;
+    rangeGoal = Math.round(dailyTarget * nWeeks * 7);
+    rangeActual = rangeReady
+      ? Math.round(trendData.reduce((s, d) => s + toNum(d?.kcal) * 7, 0))
+      : null;
+  } else {
+    // year
+    const todayRef = new Date();
+    let daysTotal = 0;
+    let kcalTotal = 0;
+    if (rangeReady) {
+      for (const bar of trendData) {
+        const [y, m] = String(bar?.date || '').split('-').map(Number);
+        if (!y || !m) continue;
+        let days = new Date(y, m, 0).getDate();
+        if (y === todayRef.getFullYear() && m === todayRef.getMonth() + 1) {
+          days = Math.min(todayRef.getDate(), days);
+        }
+        daysTotal += days;
+        kcalTotal += toNum(bar?.kcal) * days;
+      }
+    }
+    rangeGoal = Math.round(dailyTarget * (daysTotal || 365));
+    rangeActual = rangeReady ? Math.round(kcalTotal) : null;
+  }
+  const rangeRemaining = rangeReady ? rangeGoal - rangeActual : 0;
+  const rangeOver = rangeRemaining < 0;
+  const RANGE_CMP_HINT = { week: 'settimanale', month: 'mensile', year: 'annuale' };
+  const RANGE_CMP_SHORT = { week: 'sett.', month: 'mese', year: 'anno' };
+
   // Tap su un bucket del grafico trend → ci si sposta nel Diario a quella data
   // (giorno / inizio settimana / primo del mese).
   const goToDate = useCallback((dateStr) => {
@@ -3372,7 +3421,7 @@ export default function VoiceTrackDashboard() {
                 : 'none',
             }}
           >
-            <div style={{ display: 'grid', gridTemplateColumns: '32px 26px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px minmax(0, 1fr) 32px', alignItems: 'center', columnGap: '6px' }}>
               <button
                 onClick={() => shiftDay(-1)}
                 disabled={!config.apiUrl}
@@ -3381,37 +3430,42 @@ export default function VoiceTrackDashboard() {
               >
                 <ChevronLeft size={22} />
               </button>
-              <button
-                type="button"
-                onClick={() => setDiaryCalOpen((o) => !o)}
-                aria-label="Calendario"
-                aria-expanded={diaryCalOpen}
-                style={{
-                  background: diaryCalOpen ? C.surfaceRaised : 'transparent',
-                  border: `1px solid ${diaryCalOpen ? C.good : dayLine(dayOffset)}`,
-                  color: diaryCalOpen ? C.good : C.inkMuted,
-                  borderRadius: '6px',
-                  width: '26px',
-                  height: '26px',
-                  padding: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                }}
-              >
-                <Calendar size={13} />
-              </button>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', minWidth: 0 }}>
-                <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {diaryDayTitle(dayOffset, selectedDate)}
-                </span>
-                {dayOffset !== 0 && (
-                  <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', flexShrink: 0 }}>
-                    {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
+              {/* Calendario subito prima del testo data (cluster centrato). */}
+              <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, width: '100%' }}>
+                <div style={{ flex: 1, minWidth: 0 }} aria-hidden />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexShrink: 1 }}>
+                  <button
+                    type="button"
+                    onClick={() => setDiaryCalOpen((o) => !o)}
+                    aria-label="Calendario"
+                    aria-expanded={diaryCalOpen}
+                    style={{
+                      background: diaryCalOpen ? C.surfaceRaised : 'transparent',
+                      border: `1px solid ${diaryCalOpen ? C.good : dayLine(dayOffset)}`,
+                      color: diaryCalOpen ? C.good : C.inkMuted,
+                      borderRadius: '6px',
+                      width: '26px',
+                      height: '26px',
+                      padding: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Calendar size={13} />
                   </button>
-                )}
+                  <span style={{ fontSize: '14px', color: dayOffset === 0 ? C.inkMuted : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {diaryDayTitle(dayOffset, selectedDate)}
+                  </span>
+                  {dayOffset !== 0 && (
+                    <button onClick={() => goToDate(fmtYMD(new Date()))} style={{ color: C.good, background: 'transparent', border: `1px solid ${dayLine(dayOffset)}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', flexShrink: 0 }}>
+                      {historyLoading ? <Loader2 size={12} className="animate-spin" /> : 'Oggi'}
+                    </button>
+                  )}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }} aria-hidden />
               </div>
               <button
                 onClick={() => shiftDay(1)}
@@ -3423,21 +3477,6 @@ export default function VoiceTrackDashboard() {
               </button>
             </div>
           </div>
-          {diaryCalOpen && !(targetsOpen || targetsAnimOpen) && (
-            <div data-no-day-swipe style={{ flexShrink: 0, marginTop: '8px', marginBottom: '4px' }}>
-              <DayJumpCalendar
-                selectedStr={selectedDateStr}
-                mode={diaryCalMode}
-                onModeChange={setDiaryCalMode}
-                onSelect={(ymd) => {
-                  goToDate(ymd);
-                  setDiaryCalOpen(false);
-                }}
-                onClose={() => setDiaryCalOpen(false)}
-                line={dayLine(dayOffset)}
-              />
-            </div>
-          )}
 
           {/* Slot medio: readout centrato; editor absolute a tutta altezza dello slot */}
           <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
@@ -3783,10 +3822,34 @@ export default function VoiceTrackDashboard() {
 
         {/* Trend: settimana / mese / anno */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <div className="flex items-center justify-between" style={{ gap: '8px', marginBottom: '10px' }}>
+          <div className="flex items-start justify-between" style={{ gap: '10px', marginBottom: '10px' }}>
             <span style={{ fontSize: '12px', color: C.inkMuted, flex: 1, minWidth: 0 }}>
               {TREND_TITLE[trendRange]}
             </span>
+            <div style={{ flexShrink: 0, textAlign: 'right', lineHeight: 1.25 }}>
+              <div
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  color: !rangeReady ? C.inkFaint : rangeOver ? C.alert : C.ink,
+                  letterSpacing: '0.02em',
+                }}
+                title={`Consumate / obiettivo ${RANGE_CMP_HINT[trendRange]}`}
+              >
+                {rangeReady ? `${rangeActual} / ${rangeGoal}` : '…'}
+              </div>
+              {rangeReady && (
+                <div style={{ fontSize: '10px', color: rangeOver ? C.alert : C.good, marginTop: '2px' }}>
+                  {rangeOver
+                    ? `Superato ${Math.round(-rangeRemaining)}`
+                    : `Restano ${Math.round(rangeRemaining)}`}
+                  <span style={{ color: C.inkFaint, marginLeft: '4px' }}>
+                    · {RANGE_CMP_SHORT[trendRange]}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
           <div
             className="flex"
@@ -3815,9 +3878,9 @@ export default function VoiceTrackDashboard() {
               </button>
             ))}
           </div>
-          <div style={{ height: '110px' }}>
+          <div style={{ height: '124px' }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={trendData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+              <BarChart data={trendData} margin={{ top: 16, right: 0, left: 0, bottom: 0 }}>
                 <XAxis
                   dataKey="label"
                   tick={<WeekAxisTick week={trendData} selectedDate={selectedDateStr} onSelect={goToDate} />}
@@ -3836,6 +3899,17 @@ export default function VoiceTrackDashboard() {
                       cursor={d.date ? 'pointer' : 'default'}
                     />
                   ))}
+                  <LabelList
+                    dataKey="kcal"
+                    position="top"
+                    formatter={(v) => Math.round(Number(v) || 0)}
+                    style={{
+                      fill: C.inkMuted,
+                      fontSize: 9,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      fontWeight: 500,
+                    }}
+                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -4281,17 +4355,6 @@ export default function VoiceTrackDashboard() {
                     <Calendar size={14} />
                   </button>
                 </div>
-                {scanCalOpen && scanState === 'asking_qty' && (
-                  <DayJumpCalendar
-                    selectedStr={scanLogDate || fmtYMD(new Date())}
-                    mode="month"
-                    onModeChange={() => {}}
-                    showModeToggle={false}
-                    onSelect={setScanLogDateChoice}
-                    onClose={() => setScanCalOpen(false)}
-                    line={C.line}
-                  />
-                )}
                 <div className="flex items-center w-full" style={{ gap: '8px' }}>
                   <input
                     type="number"
@@ -4462,6 +4525,33 @@ export default function VoiceTrackDashboard() {
           </div>
         </div>
       </div>
+      {diaryCalOpen && !(targetsOpen || targetsAnimOpen) && (
+        <DayJumpCalendar
+          selectedStr={selectedDateStr}
+          mode={diaryCalMode}
+          onModeChange={setDiaryCalMode}
+          onSelect={(ymd) => {
+            goToDate(ymd);
+          }}
+          onClose={() => setDiaryCalOpen(false)}
+          line={dayLine(dayOffset)}
+        />
+      )}
+      {scanCalOpen && scanState === 'asking_qty' && (
+        <DayJumpCalendar
+          selectedStr={scanLogDate || fmtYMD(new Date())}
+          mode="month"
+          onModeChange={() => {}}
+          showModeToggle={false}
+          onSelect={(ymd) => {
+            if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+            setScanLogDate(ymd);
+            activeLogDateRef.current = ymd;
+          }}
+          onClose={() => setScanCalOpen(false)}
+          line={C.line}
+        />
+      )}
       {searchOpen && (
         <div
           data-no-tab-swipe
@@ -5252,6 +5342,7 @@ function DayJumpCalendar({
   line = C.line,
   showModeToggle = true,
 }) {
+  const CAL_MS = 240;
   const MONTH_IT = [
     'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
     'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
@@ -5259,6 +5350,40 @@ function DayJumpCalendar({
   const selected = parseYMD(selectedStr);
   const todayStr = fmtYMD(new Date());
   const [cursor, setCursor] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
+  // Enter/exit: mount with entered=false, rAF → true; close → false → onClose after transition.
+  const [entered, setEntered] = useState(false);
+  const closingRef = useRef(false);
+  const closedRef = useRef(false);
+
+  const finishClose = useCallback(() => {
+    if (closedRef.current) return;
+    closedRef.current = true;
+    onClose?.();
+  }, [onClose]);
+
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setEntered(false);
+  }, []);
+
+  useEffect(() => {
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setEntered(true));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, []);
+
+  // Fallback se transitionend non arriva (tab in background, reduced-motion, ecc.).
+  useEffect(() => {
+    if (entered || !closingRef.current) return undefined;
+    const t = setTimeout(finishClose, CAL_MS + 40);
+    return () => clearTimeout(t);
+  }, [entered, finishClose]);
 
   useEffect(() => {
     const d = parseYMD(selectedStr);
@@ -5271,6 +5396,18 @@ function DayJumpCalendar({
       setCursor(new Date(d.getFullYear(), d.getMonth(), 1));
     }
   }, [selectedStr, mode]);
+
+  // Overlay: blocca scroll sotto + Escape → exit anim → onClose.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') requestClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [requestClose]);
 
   const shift = (dir) => {
     const next = new Date(cursor);
@@ -5317,6 +5454,20 @@ function DayJumpCalendar({
       })()
     : `${MONTH_IT[cursor.getMonth()]} ${cursor.getFullYear()}`;
 
+  const ease = entered ? 'ease-out' : 'ease-in';
+  const anim = `opacity ${CAL_MS}ms ${ease}, transform ${CAL_MS}ms ${ease}`;
+
+  const onPanelTransitionEnd = (e) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.propertyName !== 'opacity') return;
+    if (!entered && closingRef.current) finishClose();
+  };
+
+  const pickDate = (ymd) => {
+    onSelect?.(ymd);
+    requestClose();
+  };
+
   const cellBtn = (d) => {
     if (!d) {
       return <div key={`e-${Math.random()}`} style={{ aspectRatio: '1', minHeight: '28px' }} />;
@@ -5329,7 +5480,7 @@ function DayJumpCalendar({
       <button
         key={ymd}
         type="button"
-        onClick={() => onSelect?.(ymd)}
+        onClick={() => pickDate(ymd)}
         style={{
           aspectRatio: '1',
           minHeight: '28px',
@@ -5350,85 +5501,127 @@ function DayJumpCalendar({
 
   return (
     <div
+      data-no-day-swipe
+      data-no-tab-swipe
+      role="dialog"
+      aria-modal="true"
+      aria-label="Scegli data"
+      onClick={requestClose}
       style={{
-        background: C.surfaceRaised,
-        border: `1px solid ${line}`,
-        borderRadius: '10px',
-        padding: '10px 12px',
+        position: 'fixed',
+        inset: 0,
+        zIndex: 70,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
+        paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
+        paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
+        boxSizing: 'border-box',
       }}
-      className="flex flex-col gap-2"
     >
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => shift(-1)}
-          aria-label="Precedente"
-          style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
-        >
-          <ChevronLeft size={18} />
-        </button>
-        <span style={{ fontSize: '12px', color: C.ink, fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center', flex: 1 }}>
-          {title}
-        </span>
-        <button
-          type="button"
-          onClick={() => shift(1)}
-          aria-label="Successivo"
-          style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
-        >
-          <ChevronRight size={18} />
-        </button>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Chiudi calendario"
-            style={{ background: 'transparent', border: 'none', color: C.inkFaint, padding: '4px', cursor: 'pointer', display: 'flex' }}
-          >
-            <X size={16} />
-          </button>
-        )}
-      </div>
-      {showModeToggle && (
-        <div className="flex items-center gap-1" style={{ justifyContent: 'center' }}>
-          {['week', 'month'].map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => onModeChange?.(m)}
-              style={{
-                background: mode === m ? C.good : 'transparent',
-                color: mode === m ? C.bg : C.inkMuted,
-                border: `1px solid ${mode === m ? C.good : line}`,
-                borderRadius: '6px',
-                padding: '3px 10px',
-                fontSize: '11px',
-                fontFamily: "'IBM Plex Mono', monospace",
-                cursor: 'pointer',
-              }}
-            >
-              {m === 'week' ? 'Settimana' : 'Mese'}
-            </button>
-          ))}
-        </div>
-      )}
       <div
+        aria-hidden
         style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(7, 1fr)',
-          gap: '2px',
-          fontSize: '10px',
-          color: C.inkFaint,
-          fontFamily: "'IBM Plex Mono', monospace",
-          textAlign: 'center',
+          position: 'absolute',
+          inset: 0,
+          background: 'rgba(18, 22, 19, 0.78)',
+          opacity: entered ? 1 : 0,
+          transition: `opacity ${CAL_MS}ms ${ease}`,
+          pointerEvents: 'none',
+        }}
+      />
+      <div
+        className="flex flex-col gap-2"
+        onClick={(e) => e.stopPropagation()}
+        onTransitionEnd={onPanelTransitionEnd}
+        style={{
+          position: 'relative',
+          background: C.surfaceRaised,
+          border: `1px solid ${line}`,
+          borderRadius: '12px',
+          padding: '12px 14px',
+          width: '100%',
+          maxWidth: '320px',
+          boxShadow: '0 16px 48px rgba(0,0,0,0.4)',
+          opacity: entered ? 1 : 0,
+          transform: entered ? 'scale(1) translateY(0)' : 'scale(0.96) translateY(8px)',
+          transition: anim,
         }}
       >
-        {['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'].map((w) => (
-          <div key={w}>{w}</div>
-        ))}
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' }}>
-        {cells.map((d, i) => (d ? cellBtn(d) : <div key={`pad-${i}`} style={{ aspectRatio: '1', minHeight: '28px' }} />))}
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => shift(-1)}
+            aria-label="Precedente"
+            style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <span style={{ fontSize: '12px', color: C.ink, fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center', flex: 1 }}>
+            {title}
+          </span>
+          <button
+            type="button"
+            onClick={() => shift(1)}
+            aria-label="Successivo"
+            style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
+          >
+            <ChevronRight size={18} />
+          </button>
+          {onClose && (
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label="Chiudi calendario"
+              style={{ background: 'transparent', border: 'none', color: C.inkFaint, padding: '4px', cursor: 'pointer', display: 'flex' }}
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
+        {showModeToggle && (
+          <div className="flex items-center gap-1" style={{ justifyContent: 'center' }}>
+            {['week', 'month'].map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => onModeChange?.(m)}
+                style={{
+                  background: mode === m ? C.good : 'transparent',
+                  color: mode === m ? C.bg : C.inkMuted,
+                  border: `1px solid ${mode === m ? C.good : line}`,
+                  borderRadius: '6px',
+                  padding: '3px 10px',
+                  fontSize: '11px',
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  cursor: 'pointer',
+                }}
+              >
+                {m === 'week' ? 'Settimana' : 'Mese'}
+              </button>
+            ))}
+          </div>
+        )}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(7, 1fr)',
+            gap: '2px',
+            fontSize: '10px',
+            color: C.inkFaint,
+            fontFamily: "'IBM Plex Mono', monospace",
+            textAlign: 'center',
+          }}
+        >
+          {['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'].map((w) => (
+            <div key={w}>{w}</div>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' }}>
+          {cells.map((d, i) => (d ? cellBtn(d) : <div key={`pad-${i}`} style={{ aspectRatio: '1', minHeight: '28px' }} />))}
+        </div>
       </div>
     </div>
   );
