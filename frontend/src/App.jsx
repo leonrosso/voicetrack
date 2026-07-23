@@ -457,7 +457,9 @@ const diaryMealsHeading = (offset, date) => {
   return `Pasti del ${d.toLocaleDateString('it-IT', { day: 'numeric', month: 'long' })}`;
 };
 
-// Anteprima giorno adiacente nel carosello Diario (sola lettura, niente interazioni).
+// Anteprima giorno adiacente nel carosello Diario (sola lettura).
+// Stesso above-the-fold del centro (calorie+frecce+azioni+macro) per evitare
+// il flash di layout a fine swipe; niente handler, pointer-events off.
 function DayPeek({ offset, meals, loading, error, target }) {
   const date = dateForOffset(offset);
   const totals = sumTotals(meals);
@@ -472,72 +474,198 @@ function DayPeek({ offset, meals, loading, error, target }) {
   ];
   const surf = daySurface(offset);
   const line = dayLine(offset);
+  const quickActions = [
+    { id: 'text', label: 'TESTO', icon: <Keyboard size={22} /> },
+    { id: 'cerca', label: 'CERCA', icon: <Search size={22} /> },
+    { id: 'scan', label: 'SCAN', icon: <ScanLine size={22} /> },
+    { id: 'voice', label: 'VOCE', icon: <Mic size={22} /> },
+  ];
+
   return (
-    <div className="flex flex-col gap-4" style={{ pointerEvents: 'none', userSelect: 'none' }} aria-hidden>
+    <div
+      className="flex flex-col gap-4"
+      style={{ pointerEvents: 'none', userSelect: 'none' }}
+      aria-hidden
+    >
       <div
         style={{
-          background: surf,
-          border: `1px solid ${line}`,
-          borderRadius: '14px',
-          padding: '22px 22px 34px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '14px',
-          minHeight: '160px',
+          display: 'grid',
+          gridTemplateRows: 'minmax(0, 1fr) minmax(0, 2fr)',
+          gap: '22px',
+          height: 'calc(var(--app-height, 100dvh) - 150px)',
+          paddingBottom: 'max(40px, env(safe-area-inset-bottom, 0px))',
           boxSizing: 'border-box',
+          flexShrink: 0,
         }}
       >
-        <div style={{ textAlign: 'center', fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink }}>
-          {diaryDayTitle(offset, date)}
+        <div
+          style={{
+            background: surf,
+            border: `1px solid ${line}`,
+            borderRadius: '14px',
+            padding: '22px 22px 34px',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'flex-start',
+            minHeight: 0,
+            overflow: 'hidden',
+            boxSizing: 'border-box',
+          }}
+        >
+          <div style={{ flexShrink: 0, maxHeight: 40, overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
+              <div style={{ color: C.inkMuted, padding: '4px', display: 'flex', justifyContent: 'center', width: '32px' }}>
+                <ChevronLeft size={22} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '14px', color: offset === 0 ? C.inkMuted : C.ink }}>
+                  {diaryDayTitle(offset, date)}
+                </span>
+                {offset !== 0 && (
+                  <span style={{ color: C.good, border: `1px solid ${line}`, borderRadius: '6px', padding: '2px 8px', fontSize: '11px' }}>
+                    {loading ? '…' : 'Oggi'}
+                  </span>
+                )}
+              </div>
+              <div style={{ color: C.inkMuted, padding: '4px', display: 'flex', justifyContent: 'center', width: '32px' }}>
+                <ChevronRight size={22} />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <div className="flex items-end justify-between gap-2">
+              <div className="flex items-end gap-2 min-w-0">
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
+                  {loading ? '…' : Math.round(totals.kcal)}
+                </span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
+                  / {target.kcal} kcal
+                </span>
+              </div>
+              <span
+                style={{
+                  color: C.inkMuted,
+                  background: C.surfaceRaised,
+                  border: `1px solid ${C.line}`,
+                  borderRadius: '8px',
+                  padding: '6px 10px',
+                  fontSize: '11px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  flexShrink: 0,
+                  marginBottom: '4px',
+                }}
+              >
+                <SlidersHorizontal size={12} /> Obiettivi
+              </span>
+            </div>
+            <div style={{ marginTop: '4px' }}>
+              <span style={{ fontSize: '13px', color: loading ? C.inkMuted : (overTarget ? C.alert : C.good) }}>
+                {loading
+                  ? 'Carico…'
+                  : overTarget
+                    ? `Superato di ${Math.round(-remaining)} kcal`
+                    : `Restano ${Math.round(remaining)} kcal`}
+              </span>
+            </div>
+          </div>
+
+          <div style={{ flexShrink: 0, height: 8, marginTop: 14 }}>
+            <div style={{ height: '8px', borderRadius: '999px', background: line, position: 'relative', overflow: 'hidden' }}>
+              <div style={{
+                width: `${Math.min(pct, 1) * 100}%`, height: '100%',
+                background: overTarget ? C.alert : C.good, borderRadius: '999px',
+              }} />
+              {overTarget && (
+                <div style={{ position: 'absolute', left: '100%', top: 0, height: '100%', width: `${Math.min(pct - 1, 0.25) * 100}%`, background: C.alert, opacity: 0.5 }} />
+              )}
+            </div>
+          </div>
         </div>
-        <div className="flex items-end gap-2">
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '44px', fontWeight: 600, lineHeight: 1 }}>
-            {loading ? '…' : Math.round(totals.kcal)}
-          </span>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
-            / {target.kcal} kcal
-          </span>
-        </div>
-        <div style={{ fontSize: '13px', color: overTarget ? C.alert : C.good }}>
-          {loading
-            ? 'Carico…'
-            : overTarget
-              ? `Superato di ${Math.round(-remaining)} kcal`
-              : `Restano ${Math.round(remaining)} kcal`}
-        </div>
-        <div style={{ height: '8px', borderRadius: '999px', background: line, overflow: 'hidden' }}>
-          <div style={{
-            width: `${Math.min(pct, 1) * 100}%`, height: '100%',
-            background: overTarget ? C.alert : C.good, borderRadius: '999px',
-          }} />
+
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '22px',
+            minHeight: 0,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              background: surf,
+              border: `1px solid ${line}`,
+              borderRadius: '14px',
+              padding: '18px 22px',
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              minHeight: 0,
+            }}
+          >
+            <div className="flex items-center" style={{ justifyContent: 'space-around' }}>
+              {quickActions.map((btn) => (
+                <div key={btn.id} className="flex flex-col items-center" style={{ gap: '8px' }}>
+                  <div
+                    style={{
+                      width: '56px', height: '56px', borderRadius: '999px',
+                      border: `1px solid ${C.line}`,
+                      background: C.surfaceRaised,
+                      color: C.ink,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}
+                  >
+                    {btn.icon}
+                  </div>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '10px', color: C.inkMuted, letterSpacing: '0.06em' }}>
+                    {btn.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: surf,
+              border: `1px solid ${line}`,
+              borderRadius: '14px',
+              padding: '22px',
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              minHeight: 0,
+            }}
+          >
+            <span style={{ fontSize: '12px', color: C.inkMuted }}>Macronutrienti</span>
+            <div className="flex items-center gap-4 mt-3">
+              <div style={{ width: '110px', height: '110px', position: 'relative', flexShrink: 0 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={macroCalData} dataKey="cal" innerRadius={34} outerRadius={52} startAngle={90} endAngle={-270} stroke="none">
+                      {macroCalData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <UtensilsCrossed size={18} color={C.inkFaint} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', flex: 1 }}>
+                <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={target.proteine} color={C.protein} />
+                <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={target.carboidrati} color={C.carbs} />
+                <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={target.grassi} color={C.fat} />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      <div
-        style={{
-          background: surf,
-          border: `1px solid ${line}`,
-          borderRadius: '14px',
-          padding: '22px',
-        }}
-      >
-        <span style={{ fontSize: '12px', color: C.inkMuted }}>Macronutrienti</span>
-        <div className="flex items-center gap-4 mt-3">
-          <div style={{ width: '90px', height: '90px', position: 'relative', flexShrink: 0 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={macroCalData} dataKey="cal" innerRadius={28} outerRadius={42} startAngle={90} endAngle={-270} stroke="none">
-                  {macroCalData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '13px' }}>
-            <div style={{ color: C.protein }}>P · {Math.round(totals.proteine)} g</div>
-            <div style={{ color: C.carbs }}>C · {Math.round(totals.carboidrati)} g</div>
-            <div style={{ color: C.fat }}>G · {Math.round(totals.grassi)} g</div>
-          </div>
-        </div>
-      </div>
+
       <div style={{ background: surf, border: `1px solid ${line}`, borderRadius: '14px', padding: '20px' }}>
         <span style={{ fontSize: '12px', color: C.inkMuted }}>
           {diaryMealsHeading(offset, date)} · {meals.length}
@@ -2918,17 +3046,22 @@ export default function VoiceTrackDashboard() {
               />
             </div>
             <div className="flex flex-col gap-4" style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
-        {/* Above the fold: calorie + azioni + macro riempiono la prima viewport.
-            Con Obiettivi aperto la card calorie prende tutto lo schermo utile. */}
+        {/* Above the fold: calorie + azioni + macro. Height fissa + grid 1fr/2fr
+            evita che la calorie nasca a tutta altezza e poi si restringa. */}
         <div
           style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 0,
-            minHeight: 'calc(var(--app-height, 100dvh) - 150px)',
+            display: 'grid',
+            gridTemplateRows: targetsAnimOpen
+              ? 'minmax(0, 1fr) minmax(0, 0fr)'
+              : 'minmax(0, 1fr) minmax(0, 2fr)',
+            gap: targetsAnimOpen ? 0 : '22px',
+            height: 'calc(var(--app-height, 100dvh) - 150px)',
             paddingBottom: 'max(40px, env(safe-area-inset-bottom, 0px))',
             boxSizing: 'border-box',
             flexShrink: 0,
+            transition: targetsMounted
+              ? 'grid-template-rows 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), gap 0.28s cubic-bezier(0.25, 0.8, 0.25, 1)'
+              : 'none',
           }}
         >
         {/* Hero: tre slot fissi — data | medio (readout / Obiettivi) | gauge.
@@ -2944,11 +3077,11 @@ export default function VoiceTrackDashboard() {
             border: `1px solid ${dayLine(dayOffset)}`,
             borderRadius: '14px',
             padding: '22px 22px 34px',
-            flex: 1,
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'flex-start',
             minHeight: 0,
+            overflow: 'hidden',
             overflowY: targetsMounted ? 'hidden' : undefined,
             boxSizing: 'border-box',
             touchAction: 'pan-y',
@@ -2962,9 +3095,12 @@ export default function VoiceTrackDashboard() {
               opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
               overflow: 'hidden',
               pointerEvents: (targetsOpen || targetsAnimOpen) ? 'none' : 'auto',
-              transition: (targetsOpen || targetsAnimOpen)
-                ? 'max-height 0.22s ease, opacity 0.15s ease'
-                : 'max-height 0.28s ease, opacity 0.28s ease-out',
+              // Niente transition al cold mount (evita maxHeight/opacity che animano e fanno saltare il fold).
+              transition: targetsMounted
+                ? ((targetsOpen || targetsAnimOpen)
+                  ? 'max-height 0.22s ease, opacity 0.15s ease'
+                  : 'max-height 0.28s ease, opacity 0.28s ease-out')
+                : 'none',
             }}
           >
             <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 32px', alignItems: 'center' }}>
@@ -3009,9 +3145,11 @@ export default function VoiceTrackDashboard() {
                 // Nascondi subito in apertura (targetsOpen); al ritorno stesso istante delle azioni.
                 opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
                 pointerEvents: (targetsOpen || targetsAnimOpen) ? 'none' : 'auto',
-                transition: (targetsOpen || targetsAnimOpen)
-                  ? 'opacity 0.15s ease'
-                  : 'opacity 0.28s ease-out',
+                transition: targetsMounted
+                  ? ((targetsOpen || targetsAnimOpen)
+                    ? 'opacity 0.15s ease'
+                    : 'opacity 0.28s ease-out')
+                  : 'none',
               }}
             >
               <div className="flex items-end justify-between gap-2">
@@ -3136,9 +3274,11 @@ export default function VoiceTrackDashboard() {
               marginTop: (targetsOpen || targetsAnimOpen) ? 0 : 14,
               opacity: (targetsOpen || targetsAnimOpen) ? 0 : 1,
               overflow: 'hidden',
-              transition: (targetsOpen || targetsAnimOpen)
-                ? 'height 0.22s ease, margin-top 0.22s ease, opacity 0.15s ease'
-                : 'height 0.28s ease, margin-top 0.28s ease, opacity 0.28s ease-out',
+              transition: targetsMounted
+                ? ((targetsOpen || targetsAnimOpen)
+                  ? 'height 0.22s ease, margin-top 0.22s ease, opacity 0.15s ease'
+                  : 'height 0.28s ease, margin-top 0.28s ease, opacity 0.28s ease-out')
+                : 'none',
             }}
           >
             <div style={{ height: '8px', borderRadius: '999px', background: C.line, position: 'relative', overflow: 'hidden' }}>
@@ -3153,20 +3293,17 @@ export default function VoiceTrackDashboard() {
           </div>
         </div>
 
-        {/* Azioni + macro: collassano (flex-grow → 0) mentre Obiettivi si apre, con easing */}
+        {/* Azioni + macro: seconda riga della grid; collassa con Obiettivi (0fr). */}
         <div
           style={{
             display: 'flex',
             flexDirection: 'column',
             gap: '22px',
-            flexGrow: targetsAnimOpen ? 0 : 2,
-            flexBasis: 0,
             minHeight: 0,
-            marginTop: targetsAnimOpen ? 0 : '22px',
             overflow: 'hidden',
             opacity: targetsAnimOpen ? 0 : 1,
             pointerEvents: targetsAnimOpen ? 'none' : 'auto',
-            transition: 'flex-grow 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), margin-top 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.22s ease',
+            transition: targetsMounted ? 'opacity 0.22s ease' : 'none',
           }}
           aria-hidden={targetsAnimOpen}
         >

@@ -14,6 +14,24 @@
 
 ---
 
+## 2026-07-23 — Fold Diario height+grid anti-shrink (Cursor)
+**Fatto:** fold Diario (centro + DayPeek) da `minHeight`+flex a **`height` fissa** + **CSS grid** `1fr / 2fr` (gap 22px). Obiettivi collassa la 2ª riga a `0fr` (transition solo con `targetsMounted`). Elimina il reflow che faceva nascere la scheda calorie grande e restringersi.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) shrink calorie post-transition-fix. Invariati ml parsing; focus camera.
+**Prossimo passo:** verifica telefono — open/swipe senza restringimento; Obiettivi ancora fluido.
+
+## 2026-07-23 — Anti-shrink scheda calorie al mount (Cursor)
+**Fatto:** sul fold Diario, `transition` di flex-grow/altezza/opacity (azioni+macro, slot data, gauge, readout) attive **solo** con `targetsMounted` (ciclo Obiettivi). A cold start / refresh niente animazione `flex-grow 0→2` che faceva nascere la scheda calorie grande e restringersi in ~0.28s. Apertura/chiusura Obiettivi invariata.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) shrink calorie all’apertura. Invariati ml parsing; focus camera.
+**Prossimo passo:** verifica telefono — open app / swipe giorno senza restringimento calorie; Obiettivi ancora fluido.
+
+## 2026-07-23 — DayPeek allineato al fold (Cursor)
+**Fatto:** `DayPeek` (slot adiacenti del carosello giorno) replica lo above-the-fold del centro: minHeight fold, frecce+Obiettivi decorativi, card azioni TESTO/CERCA/SCAN/VOCE, Macronutrienti con `MacroRow`; `pointer-events: none`. Elimina il flash calorie→macro vs calorie→azioni a fine swipe. Logica swipe/Obiettivi/MealRow/backend invariata.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) flash layout allo swipe giorno. Invariati ml parsing; focus camera.
+**Prossimo passo:** verifica su telefono (`npm run dev`) — swipe ieri/domani senza salto di layout.
+
 ## 2026-07-23 — Cache Config + /day_meals batch (Cursor)
 **Fatto:** cache TTL 20s + single-flight su `get_config_targets` (invalidate su `set_config_targets`); nuovo `GET /day_meals?dates=` (1–7 date, una lettura pasti, solo `dettaglio`); PWA Diario fa una fetch batch al posto di N `/daily_summary`. Tasker e forma `/daily_summary` invariati. Deploy CF → `voicetrack-00029-bob`, ACTIVE; `/health` `deploy5-day-meals-2026-07-23`.
 **Nuove superfici/config:** endpoint `/day_meals`; docs DEPLOY.md.
