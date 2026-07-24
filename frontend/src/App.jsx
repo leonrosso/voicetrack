@@ -227,6 +227,52 @@ function trendSeriesEqual(a, b) {
   return true;
 }
 
+function shiftWeekSeries(week, dayDelta) {
+  return (Array.isArray(week) ? week : []).map((d) => {
+    const dt = parseYMD(d.date);
+    dt.setDate(dt.getDate() + dayDelta);
+    return {
+      ...d,
+      date: fmtYMD(dt),
+      label: WEEKDAY_IT_BY_JSDAY[dt.getDay()],
+    };
+  });
+}
+
+/** fetch con retry su 502/503/429 (CF spesso 503 sotto carico Sheets). */
+async function fetchWithRetry(url, options = {}, { retries = 2, baseDelayMs = 1200 } = {}) {
+  const { signal } = options;
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (signal?.aborted) {
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      const res = await fetch(url, { ...options, cache: 'no-store' });
+      if (res.status === 502 || res.status === 503 || res.status === 429) {
+        lastErr = new Error(`Risposta ${res.status} dal server`);
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+          continue;
+        }
+        throw lastErr;
+      }
+      return res;
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      lastErr = e;
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr || new Error('fetch failed');
+}
+
 // Indicizzato su Date.getDay() (0 = domenica), stesse etichette di WEEKDAY_IT
 // nel backend (che invece indicizza su weekday(), 0 = lunedi').
 const WEEKDAY_IT_BY_JSDAY = ['dom', 'lun', 'mar', 'mer', 'gio', 'ven', 'sab'];
@@ -911,7 +957,8 @@ export default function VoiceTrackDashboard() {
   const [targetRangeCalOpen, setTargetRangeCalOpen] = useState(false);
   const [statsWeekOffset, setStatsWeekOffset] = useState(0);
   const statsWeekOffsetRef = useRef(0);
-  statsWeekOffsetRef.current = statsWeekOffset;
+  // Non risincronizzare il ref dallo state a ogni render: va aggiornato solo
+  // nei click/fetch (altrimenti una render intermedia puo' azzerarlo a meta' richiesta).
   const dashFetchSeqRef = useRef(0);
   const dashAbortRef = useRef(null);
   const [storageReady, setStorageReady] = useState(false);
@@ -986,10 +1033,14 @@ export default function VoiceTrackDashboard() {
     dashAbortRef.current = ac;
     try {
       const base = cfg.apiUrl.replace(/\/$/, '');
-      const res = await fetch(`${base}/dashboard?week_offset=${off}`, {
-        headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
-        signal: ac.signal,
-      });
+      const res = await fetchWithRetry(
+        `${base}/dashboard?week_offset=${off}`,
+        {
+          headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
+          signal: ac.signal,
+        },
+        { retries: 2, baseDelayMs: 1200 },
+      );
       if (!res.ok) throw new Error(`Risposta ${res.status} dal server`);
       const json = await res.json();
       // Risposta superata da un fetch piu' recente (o abort): non toccare lo stato.
@@ -999,13 +1050,11 @@ export default function VoiceTrackDashboard() {
       const nextWeek = json?.storico_settimanale ?? DEMO_WEEK;
       const nextMonth = json?.storico_mensile ?? DEMO_MONTH;
       const nextYear = json?.storico_annuale ?? DEMO_YEAR;
-      // Backend senza week_offset (CF vecchia): applica la serie solo a offset 0
-      // (la CF vecchia ignora la query e torna sempre gli ultimi 7 gg).
-      // NON usare `off === ref`: dopo un click a -1 ref==off e si riapplicava
-      // la settimana corrente, annullando il pager.
+      // Confronta col `off` di QUESTA richiesta (non il ref corrente): dopo seq-check
+      // e' la risposta vigente. CF senza campo: applica solo a offset 0.
       const respOff = json?.week_offset;
       const weekOk = typeof respOff === 'number'
-        ? respOff === statsWeekOffsetRef.current
+        ? respOff === off
         : off === 0;
       setMeals(nextMeals);
       if (weekOk) {
@@ -1020,7 +1069,7 @@ export default function VoiceTrackDashboard() {
       // Cache anti cold-start: a offset ≠ 0 non sovrascrivere la week corrente in cache.
       try {
         let weekForCache = nextWeek;
-        if (!(weekOk && statsWeekOffsetRef.current === 0)) {
+        if (!(weekOk && off === 0)) {
           weekForCache = undefined;
           try {
             const prev = await storage.get('vt-cache');
@@ -4065,15 +4114,9 @@ export default function VoiceTrackDashboard() {
                   const next = statsWeekOffset - 1;
                   statsWeekOffsetRef.current = next;
                   setStatsWeekOffset(next);
+                  // Optimistic: sposta subito le date (label/asse), i kcal arrivano dal fetch.
+                  setWeek((prev) => shiftWeekSeries(prev, -7));
                   if (config.apiUrl) fetchLive(config, true, next);
-                  else {
-                    // Demo: sposta le date del DEMO_WEEK
-                    setWeek((prev) => prev.map((d) => {
-                      const dt = parseYMD(d.date);
-                      dt.setDate(dt.getDate() - 7);
-                      return { ...d, date: fmtYMD(dt), label: WEEKDAY_IT_BY_JSDAY[dt.getDay()] };
-                    }));
-                  }
                 }}
                 style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
               >
@@ -4102,14 +4145,8 @@ export default function VoiceTrackDashboard() {
                   const next = statsWeekOffset + 1;
                   statsWeekOffsetRef.current = next;
                   setStatsWeekOffset(next);
+                  setWeek((prev) => shiftWeekSeries(prev, 7));
                   if (config.apiUrl) fetchLive(config, true, next);
-                  else {
-                    setWeek((prev) => prev.map((d) => {
-                      const dt = parseYMD(d.date);
-                      dt.setDate(dt.getDate() + 7);
-                      return { ...d, date: fmtYMD(dt), label: WEEKDAY_IT_BY_JSDAY[dt.getDay()] };
-                    }));
-                  }
                 }}
                 style={{
                   background: 'transparent',
@@ -6221,6 +6258,14 @@ function WeekAxisTick({ x, y, payload, index, week, selectedDate, onSelect }) {
   const item = (typeof index === 'number' && week[index]) || week.find((w) => w.label === payload.value);
   const clickable = !!item?.date;
   const isSelected = clickable && item.date === selectedDate;
+  // Giorno del mese se disponibile: lun/mar ripetono ogni settimana e non
+  // si capisce se il pager ha cambiato finestra.
+  let tickLabel = payload.value;
+  if (item?.date) {
+    const dayNum = parseYMD(item.date).getDate();
+    const wd = String(payload.value || item.label || '').slice(0, 3);
+    tickLabel = `${wd} ${dayNum}`;
+  }
   return (
     <g
       transform={`translate(${x},${y})`}
@@ -6228,9 +6273,9 @@ function WeekAxisTick({ x, y, payload, index, week, selectedDate, onSelect }) {
       style={{ cursor: clickable ? 'pointer' : 'default' }}
     >
       {/* Area di tap allargata (invisibile), il testo da solo e' troppo piccolo su mobile */}
-      <rect x={-16} y={-2} width={32} height={22} fill="transparent" />
-      <text x={0} y={0} dy={13} textAnchor="middle" fontSize={11} fontWeight={isSelected ? 600 : 400} fill={isSelected ? C.ink : C.inkFaint}>
-        {payload.value}
+      <rect x={-18} y={-2} width={36} height={22} fill="transparent" />
+      <text x={0} y={0} dy={13} textAnchor="middle" fontSize={10} fontWeight={isSelected ? 600 : 400} fill={isSelected ? C.ink : C.inkFaint}>
+        {tickLabel}
       </text>
     </g>
   );

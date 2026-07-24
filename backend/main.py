@@ -40,7 +40,7 @@ TZ_ITALY = timezone(timedelta(hours=2))
 API_KEY = os.environ.get("VOICETRACK_API_KEY", "")
 
 # Versione applicativa, esposta da /health (aggiornare a ogni deploy significativo)
-APP_VERSION = os.environ.get("APP_VERSION", "deploy5-week-offset-2026-07-24")
+APP_VERSION = os.environ.get("APP_VERSION", "deploy5-dash-light-2026-07-24")
 
 # Open Food Facts (Deploy 4, §5 del Piano di Consolidamento).
 # API comunitaria senza SLA (§3.9 del registro): timeout corto e
@@ -1017,7 +1017,10 @@ def _handle_dashboard(request):
                 "target_kcal": avg_tgt,
             })
 
-        target = get_config_targets()
+        # Solo lettura dalla history gia' caricata: evita get_config_targets()
+        # che puo' riscrivere il tab Config e contendersi Sheets sotto poll/pager
+        # (sintomo tipico: 503 intermittenti su /dashboard).
+        target = target_for(today, history)
 
         return _json_response({
             "status": "ok",
@@ -1030,7 +1033,6 @@ def _handle_dashboard(request):
             "storico_mensile": mensile,
             "storico_annuale": annuale,
             "target": target,
-            "target_history": history,
             "week_offset": week_offset,
             "week_start": week_start.strftime("%Y-%m-%d"),
             "week_end": week_end.strftime("%Y-%m-%d"),

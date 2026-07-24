@@ -14,6 +14,14 @@
 
 ---
 
+## 2026-07-24 — /dashboard 503 + pager settimane (Cursor)
+**Fatto:** causa reale: `/dashboard` in produzione rispondeva **503** ~9/10 (quando passava, `week_offset=-1` era corretto: 11–17 lug). Alleggerito handler: `target_for(today, history)` al posto di `get_config_targets()` (evita write Config sotto poll) e tolto `target_history` dalla risposta (PWA non lo usa). PWA: retry 502/503/429, `cache: no-store`, pager optimistic (`shiftWeekSeries`), `weekOk` vs `off` della richiesta, niente sync ref←state a ogni render, asse con giorno del mese. `APP_VERSION` → `deploy5-dash-light-2026-07-24`.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) pager “morto” per 503 silenziosi + flash/asse illeggibile; resta da redeployare CF + refresh PWA.
+**Prossimo passo:** redeploy CF → `/health` = `deploy5-dash-light-2026-07-24`; verificare curl `week_offset=0` vs `-1` senza 503; test frecce su `npm run dev`/telefono.
+
+---
+
 ## 2026-07-24 — Fix weekOk + anti-flash Statistiche (Cursor)
 **Fatto:** corretto gate `weekOk` (CF senza campo: applica settimana solo se `off===0`, non più `off===ref` che riapplicava la settimana corrente dopo freccia ←); `trendSeriesEqual` evita `setWeek`/`setMonth`/`setYear` se dati invariati (poll 20s); `isAnimationActive={false}` sul Bar Statistiche; `APP_VERSION` → `deploy5-week-offset-2026-07-24`.
 **Nuove superfici/config:** nessuna.
