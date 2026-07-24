@@ -9,7 +9,15 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+
+# Calendario Italia per valid_from / target_for (CF gira in UTC).
+_TZ_ITALY = timezone(timedelta(hours=2))
+
+
+def _today_italy() -> date:
+    return datetime.now(_TZ_ITALY).date()
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -22,23 +30,28 @@ CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 SHEET_NAME = os.environ.get("SHEET_NAME", "Pasti")
 CONFIG_SHEET_NAME = os.environ.get("CONFIG_SHEET_NAME", "Config")
+TARGET_HISTORY_SHEET_NAME = os.environ.get("TARGET_HISTORY_SHEET_NAME", "TargetHistory")
 CATALOG_SHEET_NAME = os.environ.get("CATALOG_SHEET_NAME", "Catalogo")
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Colonne del foglio pasti (ordine fisso)
 # A: timestamp | B: alimento | C: grammi | D: kcal | E: proteine | F: carboidrati
-# | G: grassi | H: fonte | I: note | J: id | K: data_dichiarata
-# NB: `id` e `data_dichiarata` sono IN CODA di proposito. Le righe storiche
-# (lunghezza < 10 o senza K) restano leggibili: id="" e data_dichiarata=timestamp.
+# | G: grassi | H: fonte | I: note | J: id | K: data_dichiarata | L: tipo_pasto
+# NB: `id`, `data_dichiarata` e `tipo_pasto` sono IN CODA di proposito. Le righe
+# storiche (senza J/K/L) restano leggibili: id="", data_dichiarata=timestamp,
+# tipo_pasto → fallback sull'ora.
 COLUMNS = [
     "timestamp", "alimento", "grammi", "kcal", "proteine", "carboidrati",
-    "grassi", "fonte", "note", "id", "data_dichiarata",
+    "grassi", "fonte", "note", "id", "data_dichiarata", "tipo_pasto",
 ]
 
-# Range completo dello schema pasti (A..K). Usato ovunque si legga/scriva il
+# Range completo dello schema pasti (A..L). Usato ovunque si legga/scriva il
 # foglio: aggiornare qui se un giorno si aggiungono colonne.
-_SHEET_RANGE = "A:K"
+_SHEET_RANGE = "A:L"
+
+# Valori ammessi per tipo_pasto (colonna L + campo LLM / client).
+PASTO_TYPES = ("colazione", "pranzo", "spuntino", "cena")
 
 # Target di default usati quando la tab Config viene creata la prima volta.
 DEFAULT_TARGETS = {"kcal": 2200, "proteine": 165, "carboidrati": 220, "grassi": 70}
@@ -82,13 +95,20 @@ _config_inflight = None
 _config_inflight_result = None
 _config_inflight_error = None
 
+# Cache storia target (stesso TTL; invalidata insieme a Config).
+_history_cache_rows = None  # list[dict] | None
+_history_cache_at = 0.0
+
 
 def _invalidate_config_cache():
-    """Azzera la cache target dopo set_config_targets."""
+    """Azzera la cache target + storia dopo set_config_targets."""
     global _config_cache_targets, _config_cache_at
+    global _history_cache_rows, _history_cache_at
     with _config_cache_lock:
         _config_cache_targets = None
         _config_cache_at = 0.0
+        _history_cache_rows = None
+        _history_cache_at = 0.0
 
 
 class SheetConfigError(Exception):
@@ -207,6 +227,21 @@ def pasto_from_hour(hour: int) -> str:
     return "cena"
 
 
+def normalize_tipo_pasto(value) -> str | None:
+    """
+    Normalizza un tipo pasto dichiarato (voce/LLM/client) ai valori canonici.
+    Ritorna None se assente o non riconosciuto (→ fallback sull'ora in lettura).
+    """
+    if value in (None, "", "null"):
+        return None
+    v = str(value).strip().lower()
+    if v in PASTO_TYPES:
+        return v
+    if v == "merenda":
+        return "spuntino"
+    return None
+
+
 def _to_float(value) -> float:
     """Converte un valore a float in modo sicuro (gestisce la virgola decimale IT)."""
     try:
@@ -225,6 +260,7 @@ def append_meal_rows(
     recorded_at: datetime,
     declared_at: datetime | None = None,
     fonte: str = "tasker-voce",
+    tipo_pasto: str | None = None,
 ):
     """
     Appende una o piu' righe al foglio pasti.
@@ -236,6 +272,8 @@ def append_meal_rows(
                      con recorded_at.
         fonte: Origine del dato: "tasker-voce" | "pwa-voce" | "pwa-barcode"
                ("voce"/"barcode" restano validi per retrocompatibilita')
+        tipo_pasto: Se dichiarato a voce/client (colazione|pranzo|spuntino|cena),
+                    scritto in L; se None, L resta vuoto e in lettura si usa l'ora.
     """
     sheets = _get_sheets_service()
     _verify_sheet_exists(sheets)
@@ -245,6 +283,7 @@ def append_meal_rows(
 
     ts_str = recorded_at.strftime("%Y-%m-%d %H:%M:%S")
     declared_str = declared_at.strftime("%Y-%m-%d %H:%M:%S")
+    tipo_str = normalize_tipo_pasto(tipo_pasto) or ""
 
     rows = []
     for item in items:
@@ -260,6 +299,7 @@ def append_meal_rows(
             "",                 # note
             str(uuid.uuid4()),  # id: UUID stabile per tap-to-edit / swipe-to-delete
             declared_str,       # data_dichiarata (giorno del pasto)
+            tipo_str,           # tipo_pasto (vuoto → fallback ora in lettura)
         ])
 
     sheets.values().append(
@@ -290,12 +330,16 @@ def _parse_row(row: list) -> dict | None:
         hour = int(meal_ts[11:13])
     except (ValueError, IndexError):
         hour = 12
+    # Tipo pasto: colonna L se dichiarata, altrimenti euristica sull'ora.
+    raw_tipo = str(row[11]).strip() if len(row) > 11 else ""
+    tipo = normalize_tipo_pasto(raw_tipo)
     return {
         "timestamp": ts,
         "data_dichiarata": meal_ts,
         "date": meal_ts[:10],
         "time": time_str,
-        "pasto": pasto_from_hour(hour),
+        "pasto": tipo or pasto_from_hour(hour),
+        "tipo_pasto": tipo or "",
         "alimento": row[1] if len(row) > 1 else "",
         "grammi": _to_float(row[2]) if len(row) > 2 else 0,
         "kcal": _to_float(row[3]) if len(row) > 3 else 0,
@@ -422,7 +466,7 @@ _EDITABLE_NUMERIC = {"grammi", "kcal", "proteine", "carboidrati", "grassi"}
 
 
 def _read_all_raw(sheets):
-    """Legge tutte le righe grezze del foglio pasti (A:K), senza parsing."""
+    """Legge tutte le righe grezze del foglio pasti (A:L), senza parsing."""
     result = sheets.values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{SHEET_NAME}!{_SHEET_RANGE}"
@@ -450,10 +494,11 @@ def _find_raw_row_by_id(values, meal_id):
 
 def update_meal_row(meal_id: str, fields: dict) -> bool:
     """
-    Aggiorna in-place la riga identificata da `meal_id`, riscrivendo solo le
-    colonne editabili (B..G = alimento, grammi, kcal, proteine, carboidrati,
-    grassi). I campi non passati in `fields` conservano il valore esistente.
-    timestamp, fonte, note e id NON vengono toccati.
+    Aggiorna in-place la riga identificata da `meal_id`, riscrivendo le
+    colonne editabili: B..G (alimento, grammi, kcal, proteine, carboidrati,
+    grassi) e opzionalmente L (tipo_pasto). I campi non passati in `fields`
+    conservano il valore esistente. timestamp, fonte, note, id e
+    data_dichiarata NON vengono toccati.
 
     Ritorna True se la riga e' stata trovata e aggiornata, False altrimenti
     (es. id inesistente o riga storica senza id).
@@ -487,11 +532,21 @@ def update_meal_row(meal_id: str, fields: dict) -> bool:
     ]
 
     row_number = idx + 1  # 1-based per la notazione A1
-    sheets.values().update(
+    data = [{
+        "range": f"{SHEET_NAME}!B{row_number}:G{row_number}",
+        "values": [new_row],
+    }]
+    if "tipo_pasto" in fields:
+        # Vuoto / null / non riconosciuto → cancella L (torna il fallback ora).
+        tipo_str = normalize_tipo_pasto(fields["tipo_pasto"]) or ""
+        data.append({
+            "range": f"{SHEET_NAME}!L{row_number}",
+            "values": [[tipo_str]],
+        })
+
+    sheets.values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"{SHEET_NAME}!B{row_number}:G{row_number}",
-        valueInputOption="USER_ENTERED",
-        body={"values": [new_row]},
+        body={"valueInputOption": "USER_ENTERED", "data": data},
     ).execute()
     _invalidate_meals_cache()
     return True
@@ -529,8 +584,29 @@ def delete_meal_row(meal_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Config (target giornalieri) — leggibili e scrivibili dalla webapp
+# Config (target giornalieri) + TargetHistory (fasce valid_from)
 # ---------------------------------------------------------------------------
+_HISTORY_HEADER = ["valid_from", "kcal", "proteine", "carboidrati", "grassi"]
+
+
+def _clean_targets(targets: dict) -> dict:
+    """Normalizza i 4 target (default se mancanti / <=0)."""
+    clean = {}
+    for k in _TARGET_KEYS:
+        clean[k] = _to_float(targets.get(k, DEFAULT_TARGETS[k]))
+        if clean[k] <= 0:
+            clean[k] = DEFAULT_TARGETS[k]
+    return clean
+
+
+def _targets_equal(a: dict, b: dict) -> bool:
+    """Confronto numerico sui 4 target (tolleranza 0.05)."""
+    for k in _TARGET_KEYS:
+        if abs(_to_float(a.get(k)) - _to_float(b.get(k))) > 0.05:
+            return False
+    return True
+
+
 def _write_targets(sheets, targets: dict):
     """Scrive i 4 target nella tab Config in layout fisso (chiave|valore)."""
     values = [[k, targets.get(k, DEFAULT_TARGETS[k])] for k in _TARGET_KEYS]
@@ -543,7 +619,7 @@ def _write_targets(sheets, targets: dict):
 
 
 def _fetch_config_targets_uncached() -> dict:
-    """Lettura tab Config + parse (nessuna cache)."""
+    """Lettura tab Config A1:B4 + parse (nessuna cache). Non risolve la storia."""
     sheets = _get_sheets_service()
     _ensure_config_sheet(sheets)
 
@@ -562,11 +638,154 @@ def _fetch_config_targets_uncached() -> dict:
     return {k: found.get(k, DEFAULT_TARGETS[k]) for k in _TARGET_KEYS}
 
 
+def _parse_history_row(row: list) -> dict | None:
+    """Parsa una riga TargetHistory (salta header / righe malformate)."""
+    if not row or len(row) < 2:
+        return None
+    raw = str(row[0]).strip()
+    if not raw or raw.lower() == "valid_from":
+        return None
+    try:
+        valid = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    band = {"valid_from": valid.strftime("%Y-%m-%d")}
+    for i, k in enumerate(_TARGET_KEYS):
+        band[k] = _to_float(row[i + 1]) if len(row) > i + 1 else DEFAULT_TARGETS[k]
+        if band[k] <= 0:
+            band[k] = DEFAULT_TARGETS[k]
+    return band
+
+
+def _earliest_meal_date() -> date | None:
+    """Prima data pasto sul foglio, o None se vuoto / errore."""
+    try:
+        rows = get_all_meal_rows()
+    except Exception:
+        return None
+    dates = []
+    for m in rows:
+        try:
+            dates.append(datetime.strptime(m["date"][:10], "%Y-%m-%d").date())
+        except (ValueError, TypeError, KeyError):
+            continue
+    return min(dates) if dates else None
+
+
+def _ensure_target_history_sheet(sheets, seed_targets: dict | None = None):
+    """
+    Assicura la tab TargetHistory. Se manca o e' vuota, backfill una riga
+    valid_from = min(prima data pasti, oggi) con i target correnti/default.
+    """
+    global _sheet_titles_cache
+    titles = _get_titles(sheets)
+    created = False
+    if TARGET_HISTORY_SHEET_NAME not in titles:
+        sheets.batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{
+                "addSheet": {"properties": {"title": TARGET_HISTORY_SHEET_NAME}}
+            }]}
+        ).execute()
+        _sheet_titles_cache = None
+        created = True
+
+    result = sheets.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{TARGET_HISTORY_SHEET_NAME}!A1:E50"
+    ).execute()
+    values = result.get("values") or []
+    has_data = any(_parse_history_row(r) for r in values)
+
+    if created or not has_data:
+        seed = _clean_targets(seed_targets or DEFAULT_TARGETS)
+        today = _today_italy()
+        earliest = _earliest_meal_date()
+        start = earliest if earliest is not None and earliest < today else today
+        body = [
+            _HISTORY_HEADER,
+            [
+                start.strftime("%Y-%m-%d"),
+                seed["kcal"],
+                seed["proteine"],
+                seed["carboidrati"],
+                seed["grassi"],
+            ],
+        ]
+        sheets.values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{TARGET_HISTORY_SHEET_NAME}!A1:E2",
+            valueInputOption="USER_ENTERED",
+            body={"values": body}
+        ).execute()
+
+
+def _fetch_target_history_uncached() -> list[dict]:
+    """Lettura TargetHistory ordinata per valid_from (poi ordine foglio)."""
+    sheets = _get_sheets_service()
+    _ensure_config_sheet(sheets)
+    mirror = _fetch_config_targets_uncached()
+    _ensure_target_history_sheet(sheets, seed_targets=mirror)
+
+    result = sheets.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{TARGET_HISTORY_SHEET_NAME}!A1:E200"
+    ).execute()
+
+    bands = []
+    for row in result.get("values") or []:
+        parsed = _parse_history_row(row)
+        if parsed:
+            bands.append(parsed)
+
+    # Stabile: data asc, poi ordine di lettura (ultime righe stesso giorno vincono in target_for)
+    bands.sort(key=lambda b: b["valid_from"])
+    return bands
+
+
+def target_for(day: date, history: list[dict] | None = None) -> dict:
+    """
+    Target in vigore nel giorno D: ultima fascia con valid_from <= D
+    (ultimo impostato prima della mezzanotte di D+1).
+    """
+    if history is None:
+        history = get_target_history()
+    best = None
+    day_str = day.strftime("%Y-%m-%d") if isinstance(day, date) else str(day)[:10]
+    for band in history:
+        if band["valid_from"] <= day_str:
+            best = band
+        else:
+            break
+    if best is None:
+        return dict(DEFAULT_TARGETS)
+    return {k: best[k] for k in _TARGET_KEYS}
+
+
+def get_target_history() -> list[dict]:
+    """Lista fasce TargetHistory (cache TTL 20s, condivisa col lock Config)."""
+    global _history_cache_rows, _history_cache_at
+
+    now = time.monotonic()
+    with _config_cache_lock:
+        if (
+            _history_cache_rows is not None
+            and (now - _history_cache_at) < _CONFIG_CACHE_TTL_S
+        ):
+            return [dict(b) for b in _history_cache_rows]
+
+    bands = _fetch_target_history_uncached()
+    with _config_cache_lock:
+        _history_cache_rows = bands
+        _history_cache_at = time.monotonic()
+    return [dict(b) for b in bands]
+
+
 def get_config_targets() -> dict:
     """
-    Legge i target dalla tab Config. Se la tab non esiste, la crea con i
-    default e li ritorna. Chiavi mancanti vengono completate coi default.
-    Cache TTL 20s + single-flight (stesso pattern dei pasti).
+    Target corrente = target_for(oggi) dalla storia (A1:B4 e' lo specchio legacy).
+    Se la copia Config e' in ritardo rispetto a una fascia gia' in vigore,
+    risincronizza A1:B4. Cache TTL 20s + single-flight.
     """
     global _config_cache_targets, _config_cache_at
     global _config_inflight, _config_inflight_result, _config_inflight_error
@@ -596,16 +815,26 @@ def get_config_targets() -> dict:
                 raise _config_inflight_error
             if _config_inflight_result is not None:
                 return dict(_config_inflight_result)
-        return _fetch_config_targets_uncached()
+        history = get_target_history()
+        return target_for(_today_italy(), history)
 
     try:
-        targets = _fetch_config_targets_uncached()
+        history = _fetch_target_history_uncached()
+        today = _today_italy()
+        resolved = target_for(today, history)
+        # Specchio Config: allinea se una fascia "da domani" e' diventata attiva
+        sheets = _get_sheets_service()
+        mirror = _fetch_config_targets_uncached()
+        if not _targets_equal(mirror, resolved):
+            _write_targets(sheets, resolved)
         with _config_cache_lock:
-            _config_cache_targets = targets
+            _history_cache_rows = history
+            _history_cache_at = time.monotonic()
+            _config_cache_targets = resolved
             _config_cache_at = time.monotonic()
-            _config_inflight_result = targets
+            _config_inflight_result = resolved
             _config_inflight_error = None
-        return dict(targets)
+        return dict(resolved)
     except Exception as e:
         with _config_cache_lock:
             _config_inflight_error = e
@@ -619,23 +848,150 @@ def get_config_targets() -> dict:
             done.set()
 
 
-def set_config_targets(targets: dict) -> dict:
+def _append_history_row(sheets, valid_from: date, targets: dict):
+    """Appende una riga a TargetHistory (senza header)."""
+    sheets.values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{TARGET_HISTORY_SHEET_NAME}!A:E",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [[
+            valid_from.strftime("%Y-%m-%d"),
+            targets["kcal"],
+            targets["proteine"],
+            targets["carboidrati"],
+            targets["grassi"],
+        ]]}
+    ).execute()
+
+
+def _band_row(valid_from: date | str, targets: dict) -> dict:
+    vf = valid_from.strftime("%Y-%m-%d") if isinstance(valid_from, date) else str(valid_from)[:10]
+    return {
+        "valid_from": vf,
+        "kcal": targets["kcal"],
+        "proteine": targets["proteine"],
+        "carboidrati": targets["carboidrati"],
+        "grassi": targets["grassi"],
+    }
+
+
+def _rewrite_target_history(sheets, bands: list[dict]):
+    """Riscrive l'intera tab TargetHistory (header + fasce ordinate)."""
+    ordered = sorted(bands, key=lambda b: b["valid_from"])
+    values = [_HISTORY_HEADER]
+    for b in ordered:
+        values.append([
+            b["valid_from"],
+            b["kcal"],
+            b["proteine"],
+            b["carboidrati"],
+            b["grassi"],
+        ])
+    sheets.values().clear(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{TARGET_HISTORY_SHEET_NAME}!A:E",
+    ).execute()
+    sheets.values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{TARGET_HISTORY_SHEET_NAME}!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": values},
+    ).execute()
+
+
+def apply_target_span(
+    targets: dict,
+    mode: str,
+    start: date,
+    end: date | None = None,
+) -> dict:
     """
-    Salva i target nella tab Config (creandola se manca). Ritorna i target
-    effettivamente salvati (con eventuali default per chiavi mancanti).
+    Applica i target su un ambito temporale e riscrive TargetHistory.
+
+    mode:
+      - "from": fascia a start, elimina tutte le fasce con valid_from > start
+      - "day": solo start (equivalente a range con end=start)
+      - "range": [start, end] inclusivi; ripristina a end+1 il piano pre-edit
+
+    Ritorna il target corrente (in vigore oggi).
     """
+    clean = _clean_targets(targets)
+    today = _today_italy()
+    mode_n = (mode or "from").strip().lower()
+    if mode_n in ("day", "solo", "single"):
+        mode_n = "day"
+        end = start
+    elif mode_n in ("range", "intervallo"):
+        mode_n = "range"
+    elif mode_n in ("from", "forward", "poi"):
+        mode_n = "from"
+    else:
+        raise ValueError("mode non valido: usa from | day | range")
+
+    if mode_n == "range":
+        if end is None:
+            raise ValueError("Per mode=range serve 'end' (YYYY-MM-DD)")
+        if end < start:
+            raise ValueError("'end' deve essere >= 'start'")
+        if (end - start).days > 366:
+            raise ValueError("Intervallo massimo 366 giorni")
+
     sheets = _get_sheets_service()
     _ensure_config_sheet(sheets)
+    history = _fetch_target_history_uncached()
+    start_str = start.strftime("%Y-%m-%d")
 
-    clean = {}
-    for k in _TARGET_KEYS:
-        clean[k] = _to_float(targets.get(k, DEFAULT_TARGETS[k]))
-        if clean[k] <= 0:
-            clean[k] = DEFAULT_TARGETS[k]
+    if mode_n == "from":
+        # Tiene solo fasce strettamente prima di start; elimina start e tutto il dopo.
+        new_bands = [b for b in history if b["valid_from"] < start_str]
+        existing = target_for(start, history)
+        if not _targets_equal(existing, clean):
+            new_bands.append(_band_row(start, clean))
+        # Se i valori coincidono gia' (fascia precedente), basta aver tagliato il futuro.
+    else:
+        # day / range
+        assert end is not None
+        end_str = end.strftime("%Y-%m-%d")
+        end_plus = end + timedelta(days=1)
+        end_plus_str = end_plus.strftime("%Y-%m-%d")
+        restore = target_for(end_plus, history)
 
-    _write_targets(sheets, clean)
+        # Tieni fasce fuori da [start, end]; togli anche end+1 (la riscriviamo).
+        new_bands = [
+            b for b in history
+            if not (start_str <= b["valid_from"] <= end_str)
+            and b["valid_from"] != end_plus_str
+        ]
+        new_bands.append(_band_row(start, clean))
+        if not _targets_equal(restore, clean):
+            new_bands.append(_band_row(end_plus, restore))
+
+    # Coalesce: se due fasce consecutive identiche, tieni solo la prima
+    new_bands.sort(key=lambda b: b["valid_from"])
+    coalesced = []
+    for b in new_bands:
+        if coalesced and _targets_equal(coalesced[-1], b):
+            continue
+        coalesced.append(b)
+    new_bands = coalesced
+
+    _ensure_target_history_sheet(sheets, seed_targets=clean)
+    _rewrite_target_history(sheets, new_bands)
+
+    current = target_for(today, new_bands)
+    _write_targets(sheets, current)
     _invalidate_config_cache()
-    return clean
+    return current
+
+
+def set_config_targets(targets: dict, valid_from: date | None = None) -> dict:
+    """
+    Compat: equivale a apply_target_span(..., mode='from', start=valid_from|oggi).
+    """
+    today = _today_italy()
+    vf = valid_from if valid_from is not None else today
+    return apply_target_span(targets, mode="from", start=vf)
 
 
 # ---------------------------------------------------------------------------

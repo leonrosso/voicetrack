@@ -28,6 +28,7 @@ REGOLE:
 8. Rispondi SOLO con JSON valido, nessun testo prima o dopo.
 9. BEVANDE E LIQUIDI in millilitri (es. "500 ml di birra", "200 ml di latte"): tratta i ml come grammi (per le bevande 1 ml ≈ 1 g) e metti il numero nel campo "grammi". NON aggiungere note, commenti, campi extra o testo sulla conversione: la risposta resta SOLO il JSON nel formato indicato. I valori nutrizionali vanno calcolati per la quantità dichiarata.
 10. DATA DEL PASTO: il messaggio utente indica quale giorno è "oggi". Se il testo contiene un riferimento temporale (ieri, l'altro ieri, domani, dopodomani, sabato scorso, sabato prossimo, il 16 luglio, lunedì scorso, ecc. — anche date future), risolvilo in data_riferimento (YYYY-MM-DD) e etichetta_giorno. Se NON c'è alcun riferimento temporale, metti data_riferimento e etichetta_giorno a null (NON inventare). Se manca l'anno, usa l'anno di oggi; se la data senza anno cadrebbe troppo lontana, scegli l'anno più vicino al senso (passato per "scorso", futuro per "prossimo"/"domani"). Per un weekday ambiguo senza "scorso"/"prossimo", preferisci la ricorrenza più vicina a oggi. NON includere il giorno nel riepilogo_vocale nutrizionale: lo aggiunge il sistema.
+11. TIPO PASTO: se il testo indica esplicitamente il tipo di pasto (a colazione / colazione, a pranzo / pranzo, spuntino / merenda, a cena / cena, per cena, ecc.), metti tipo_pasto con uno di: "colazione", "pranzo", "spuntino", "cena" (merenda → "spuntino"). Se NON è indicato, metti tipo_pasto a null (NON inventare dall'ora o dal cibo). Un solo tipo per risposta: se la frase mescola tipi diversi, scegli quello dominante o chiedi chiarimento. NON nominare il tipo nel riepilogo_vocale.
 
 FORMATO RISPOSTA (pasto registrato con successo):
 {
@@ -50,7 +51,8 @@ FORMATO RISPOSTA (pasto registrato con successo):
   },
   "data_riferimento": null,
   "etichetta_giorno": null,
-  "riepilogo_vocale": "Breve frase in italiano che riassume il pasto e i totali per essere letta ad alta voce. Max 2 frasi. Senza nominare il giorno."
+  "tipo_pasto": null,
+  "riepilogo_vocale": "Breve frase in italiano che riassume il pasto e i totali per essere letta ad alta voce. Max 2 frasi. Senza nominare il giorno né il tipo pasto."
 }
 
 FORMATO RISPOSTA (quantità vaga, serve chiarimento):
@@ -59,7 +61,8 @@ FORMATO RISPOSTA (quantità vaga, serve chiarimento):
   "message": "Domanda specifica in italiano per chiarire la quantità",
   "riepilogo_vocale": "Stessa domanda in forma naturale per TTS",
   "data_riferimento": null,
-  "etichetta_giorno": null
+  "etichetta_giorno": null,
+  "tipo_pasto": null
 }
 
 ESEMPI DI STIME ACCURATE:

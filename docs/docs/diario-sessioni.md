@@ -14,6 +14,30 @@
 
 ---
 
+## 2026-07-24 — Target dal Diario (ambiti) + pager settimane Statistiche (Cursor)
+**Fatto:** (1) `apply_target_span` su TargetHistory: mode `from` / `day` / `range` con riscrittura foglio; POST `/config` body `mode+start[+end]` (compat `effective`/`valid_from`). (2) Obiettivi PWA: chip Solo questo giorno / Da questo giorno in poi / Intervallo… (calendario range); bozza da `dayTarget`; ancora = giorno Diario. (3) `/dashboard?week_offset=N` + frecce settimane in vista Settimana.
+**Nuove superfici/config:** POST `/config` ambiti; query `week_offset`; calendario `selectMode=range`.
+**Bug aperti/chiusi:** chiuso (codice) salvataggio obiettivi ignorava il giorno Diario; CF+Vercel da deployare.
+**Prossimo passo:** deploy CF + Vercel; test ambiti su giorno passato + scorrimento settimane.
+
+---
+
+## 2026-07-24 — Tipo pasto dichiarato a voce (Cursor)
+**Fatto:** colonna Sheets `tipo_pasto` (L) + schema pasti A–L; LLM estrae `tipo_pasto` (colazione|pranzo|spuntino|cena) solo se detto esplicitamente, altrimenti null; precedenza voce → body client (`tipo_pasto`/`meal_type`) → vuoto; in lettura L valorizzato vince, senò fallback `pasto_from_hour`; `/log_meal`/`/scan_barcode`/`/log_catalog` scrivono L; `/update_meal` accetta `tipo_pasto`. Tasker/PWA UI invariati (i gruppi Diario usano già `pasto`).
+**Nuove superfici/config:** header `tipo_pasto` in L1 sul foglio; range `A:L`; `APP_VERSION` `deploy5-tipo-pasto-2026-07-24`.
+**Bug aperti/chiusi:** chiuso (codice) «ieri a cena» finiva in pranzo per mezzogiorno; CF da redeployare + header L1.
+**Prossimo passo:** header L1; deploy CF; test «ieri a cena …» → gruppo Cena; frase senza tipo → euristica ora.
+
+---
+
+## 2026-07-23 — Storia target + dual-view Statistiche (Cursor)
+**Fatto:** tab Sheets `TargetHistory` (append-only, `valid_from` + kcal/P/C/G); helper `target_for(D)` = ultima fascia con `valid_from ≤ D`; `/config` GET/POST con `target_history` e `effective` today|tomorrow; `/daily_summary`, `/dashboard` (`target_kcal` per barra + history), `/day_meals` (target per giorno). PWA: Diario passato/futuro usa target del giorno; Statistiche toggle ATTUALE/STORICO (`vt-stats-mode`); Obiettivi chip Da oggi/Da domani + invalidazione cache.
+**Nuove superfici/config:** tab `TargetHistory`; localStorage `vt-stats-mode`; POST `/config` body `effective`.
+**Bug aperti/chiusi:** chiuso (codice) mismatch Diario storico vs target corrente; CF e Vercel da deployare.
+**Prossimo passo:** deploy CF + Vercel; test cambio obiettivo a metà settimana (vista attuale vs storica) e «Da domani».
+
+---
+
 ## 2026-07-23 — Confronto kcal per range (sett/mese/anno) (Cursor)
 **Fatto:** card Statistiche — confronto alto dx segue il toggle: **Settimana** `Σ kcal` vs `target×7`; **Mese** `Σ(avg×7)` vs `target×(n×7)` (5 settimane rolling); **Anno** `Σ(avg×giorniMese)` vs `target×Σgiorni` (mese corrente fino a oggi); caption `sett./mese/anno`; `…` se serie attiva vuota.
 **Nuove superfici/config:** nessuna.

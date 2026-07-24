@@ -227,7 +227,12 @@ function buildDemoWeek() {
   for (let j = 6; j >= 0; j--) {
     const d = new Date(today);
     d.setDate(d.getDate() - j);
-    week.push({ label: WEEKDAY_IT_BY_JSDAY[d.getDay()], date: fmtYMD(d), kcal: kcals[6 - j] });
+    week.push({
+      label: WEEKDAY_IT_BY_JSDAY[d.getDay()],
+      date: fmtYMD(d),
+      kcal: kcals[6 - j],
+      target_kcal: DEMO_TARGET.kcal,
+    });
   }
   return week;
 }
@@ -247,6 +252,7 @@ function buildDemoMonth() {
       label: `${start.getDate()}/${start.getMonth() + 1}`,
       date: fmtYMD(start),
       kcal: kcals[4 - w],
+      target_kcal: DEMO_TARGET.kcal,
     });
   }
   return out;
@@ -264,6 +270,7 @@ function buildDemoYear() {
       label: MONTH_IT[d.getMonth()],
       date: fmtYMD(d),
       kcal: kcals[11 - m],
+      target_kcal: DEMO_TARGET.kcal,
     });
   }
   return out;
@@ -476,7 +483,13 @@ async function loadPersistedDayCache() {
     const out = {};
     for (const [str, entry] of Object.entries(parsed.days)) {
       if (Array.isArray(entry?.meals)) {
-        out[str] = { meals: entry.meals, loading: false, error: '', at: entry.at || 0 };
+        out[str] = {
+          meals: entry.meals,
+          target: entry.target || null,
+          loading: false,
+          error: '',
+          at: entry.at || 0,
+        };
       }
     }
     return out;
@@ -485,7 +498,7 @@ async function loadPersistedDayCache() {
   }
 }
 
-async function persistDayCacheEntry(str, meals) {
+async function persistDayCacheEntry(str, meals, target = null) {
   try {
     const raw = await storage.get(DAY_CACHE_KEY);
     let days = {};
@@ -493,7 +506,7 @@ async function persistDayCacheEntry(str, meals) {
       const parsed = JSON.parse(raw.value);
       if (parsed?.version === 1 && parsed.days) days = { ...parsed.days };
     }
-    days[str] = { meals, at: Date.now() };
+    days[str] = { meals, target: target || null, at: Date.now() };
     await storage.set(DAY_CACHE_KEY, JSON.stringify({ version: 1, days: prunePersistedDays(days) }));
   } catch (e) {}
 }
@@ -867,7 +880,25 @@ export default function VoiceTrackDashboard() {
   const [month, setMonth] = useState(DEMO_MONTH);
   const [year, setYear] = useState(DEMO_YEAR);
   const [trendRange, setTrendRange] = useState('week'); // week | month | year
+  const [statsMode, setStatsMode] = useState(() => {
+    try {
+      const v = localStorage.getItem('vt-stats-mode');
+      return v === 'history' ? 'history' : 'current';
+    } catch (e) {
+      return 'current';
+    }
+  });
+  const setStatsModePersist = useCallback((mode) => {
+    setStatsMode(mode);
+    try { localStorage.setItem('vt-stats-mode', mode); } catch (e) {}
+  }, []);
   const [target, setTarget] = useState(DEMO_TARGET);
+  const [targetScope, setTargetScope] = useState('from'); // from | day | range
+  const [targetRange, setTargetRange] = useState(null); // { start, end } when scope=range
+  const [targetRangeCalOpen, setTargetRangeCalOpen] = useState(false);
+  const [statsWeekOffset, setStatsWeekOffset] = useState(0);
+  const statsWeekOffsetRef = useRef(0);
+  statsWeekOffsetRef.current = statsWeekOffset;
   const [storageReady, setStorageReady] = useState(false);
   const [targetsOpen, setTargetsOpen] = useState(false);
   const [targetsMounted, setTargetsMounted] = useState(false);
@@ -923,12 +954,13 @@ export default function VoiceTrackDashboard() {
 
   const POLL_MS = 20000; // refresh dati ogni 20s mentre l'app e' aperta e visibile
 
-  const fetchLive = useCallback(async (cfg, silent = false) => {
+  const fetchLive = useCallback(async (cfg, silent = false, weekOff) => {
     if (!silent) setStatus('loading');
     setErrorMsg('');
     try {
       const base = cfg.apiUrl.replace(/\/$/, '');
-      const res = await fetch(`${base}/dashboard`, {
+      const off = weekOff !== undefined ? weekOff : statsWeekOffsetRef.current;
+      const res = await fetch(`${base}/dashboard?week_offset=${off}`, {
         headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
       });
       if (!res.ok) throw new Error(`Risposta ${res.status} dal server`);
@@ -1199,6 +1231,11 @@ export default function VoiceTrackDashboard() {
       setTargetMsg('Serve una ripartizione al 100% per salvare');
       return;
     }
+    if (targetScope === 'range' && (!targetRange?.start || !targetRange?.end)) {
+      setTargetMsg('Scegli un intervallo dal calendario');
+      setTargetRangeCalOpen(true);
+      return;
+    }
     const kcal = Number(targetDraft.kcal) || DEMO_TARGET.kcal;
     const clean = {
       kcal,
@@ -1206,27 +1243,51 @@ export default function VoiceTrackDashboard() {
       carboidrati: Math.round(toNum(targetDraft.carboidrati)),
       grassi: Math.round(toNum(targetDraft.grassi)),
     };
-    // Live: salva sul backend nella tab Config
+    const mode = targetScope === 'day' || targetScope === 'range' ? targetScope : 'from';
+    const start = mode === 'range' ? targetRange.start : selectedDateStr;
+    const end = mode === 'range' ? targetRange.end : (mode === 'day' ? selectedDateStr : undefined);
+    const fmtShort = (ymd) => {
+      const [, m, d] = ymd.split('-');
+      return `${Number(d)}/${Number(m)}`;
+    };
+    const okMsg = mode === 'day'
+      ? `Salvato solo per ${fmtShort(start)}`
+      : mode === 'range'
+        ? `Salvato ${fmtShort(start)}–${fmtShort(end)}`
+        : `Da ${fmtShort(start)} in poi`;
+
+    // Live: salva sul backend nella tab Config (+ TargetHistory)
     if (config.apiUrl) {
       setSavingTargets(true);
       setTargetMsg('');
       try {
         const base = config.apiUrl.replace(/\/$/, '');
+        const body = { target: clean, mode, start };
+        if (end) body.end = end;
         const res = await fetch(`${base}/config`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
           },
-          body: JSON.stringify({ target: clean }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) throw new Error(`Risposta ${res.status}`);
         const json = await res.json();
         const saved = json?.target ?? clean;
         setTarget(saved);
         setTargetDraft(saved);
-        setTargetMsg('Obiettivi salvati sul foglio');
+        setMacroPct(pctFromGrams(saved));
+        setTargetMsg(okMsg);
         setTargetsOpen(false);
+        setTargetScope('from');
+        setTargetRange(null);
+        // Invalida cache giorni + vt-cache e ricarica dashboard
+        try { await storage.set('vt-cache', JSON.stringify({})); } catch (e) {}
+        try { await storage.set('vt-day-cache', JSON.stringify({ version: 1, days: {} })); } catch (e) {}
+        setDayCache({});
+        setHistoryTick((t) => t + 1);
+        await fetchLive(config, true);
       } catch (e) {
         setTargetMsg(`Errore nel salvataggio: ${e.message}`);
       } finally {
@@ -1236,8 +1297,10 @@ export default function VoiceTrackDashboard() {
       // Demo: solo stato locale
       setTarget(clean);
       setTargetDraft(clean);
-      setTargetMsg('Salvato (demo — non persistito)');
+      setTargetMsg(`${okMsg} (demo — non persistito)`);
       setTargetsOpen(false);
+      setTargetScope('from');
+      setTargetRange(null);
     }
   };
 
@@ -2557,31 +2620,41 @@ export default function VoiceTrackDashboard() {
 
   const trendData = trendRange === 'year' ? year : trendRange === 'month' ? month : week;
 
-  // Confronto consumate / obiettivo in alto a destra: segue il range attivo.
-  // Settimana: barre = kcal giornaliere → Σ vs target×7.
-  // Mese: barre = media giornaliera su bucket da 7gg → Σ(avg×7) vs target×(n×7).
-  // Anno: barre = media giornaliera del mese → Σ(avg×giorniMese) vs target×Σgiorni
-  //   (mese corrente: solo giorni fino a oggi).
+  // Confronto consumate / obiettivo: mode current = target attuale × N;
+  // mode history = somma / medie dei target_kcal per barra (dal backend).
   const dailyTarget = toNum(target?.kcal);
   const rangeReady = Array.isArray(trendData) && trendData.length > 0;
+  const useHistoryGoals = statsMode === 'history';
   let rangeGoal = 0;
   let rangeActual = null;
   if (trendRange === 'week') {
-    rangeGoal = Math.round(dailyTarget * (rangeReady ? trendData.length : 7));
     rangeActual = rangeReady
       ? Math.round(trendData.reduce((s, d) => s + toNum(d?.kcal), 0))
       : null;
+    if (useHistoryGoals && rangeReady) {
+      rangeGoal = Math.round(trendData.reduce((s, d) => s + toNum(d?.target_kcal ?? dailyTarget), 0));
+    } else {
+      rangeGoal = Math.round(dailyTarget * (rangeReady ? trendData.length : 7));
+    }
   } else if (trendRange === 'month') {
     const nWeeks = rangeReady ? trendData.length : 5;
-    rangeGoal = Math.round(dailyTarget * nWeeks * 7);
     rangeActual = rangeReady
       ? Math.round(trendData.reduce((s, d) => s + toNum(d?.kcal) * 7, 0))
       : null;
+    if (useHistoryGoals && rangeReady) {
+      rangeGoal = Math.round(trendData.reduce(
+        (s, d) => s + toNum(d?.target_kcal ?? dailyTarget) * 7,
+        0,
+      ));
+    } else {
+      rangeGoal = Math.round(dailyTarget * nWeeks * 7);
+    }
   } else {
     // year
     const todayRef = new Date();
     let daysTotal = 0;
     let kcalTotal = 0;
+    let histGoal = 0;
     if (rangeReady) {
       for (const bar of trendData) {
         const [y, m] = String(bar?.date || '').split('-').map(Number);
@@ -2592,15 +2665,30 @@ export default function VoiceTrackDashboard() {
         }
         daysTotal += days;
         kcalTotal += toNum(bar?.kcal) * days;
+        histGoal += toNum(bar?.target_kcal ?? dailyTarget) * days;
       }
     }
-    rangeGoal = Math.round(dailyTarget * (daysTotal || 365));
     rangeActual = rangeReady ? Math.round(kcalTotal) : null;
+    rangeGoal = useHistoryGoals && rangeReady
+      ? Math.round(histGoal)
+      : Math.round(dailyTarget * (daysTotal || 365));
   }
   const rangeRemaining = rangeReady ? rangeGoal - rangeActual : 0;
   const rangeOver = rangeRemaining < 0;
   const RANGE_CMP_HINT = { week: 'settimanale', month: 'mensile', year: 'annuale' };
   const RANGE_CMP_SHORT = { week: 'sett.', month: 'mese', year: 'anno' };
+  const statsModeHint = useHistoryGoals ? 'vs piani di quei giorni' : 'vs obiettivo attuale';
+  const historyBarTargets = rangeReady
+    ? trendData.map((d) => toNum(d?.target_kcal ?? dailyTarget))
+    : [];
+  const historyTargetsUniform = historyBarTargets.length > 0
+    && historyBarTargets.every((t) => Math.abs(t - historyBarTargets[0]) < 0.5);
+  const refLineKcal = useHistoryGoals
+    ? (historyTargetsUniform ? historyBarTargets[0] : null)
+    : dailyTarget;
+  const barThreshold = (d) => (
+    useHistoryGoals ? toNum(d?.target_kcal ?? dailyTarget) : dailyTarget
+  );
 
   // Tap su un bucket del grafico trend → ci si sposta nel Diario a quella data
   // (giorno / inizio settimana / primo del mese).
@@ -2773,7 +2861,13 @@ export default function VoiceTrackDashboard() {
       if (!hasMeals) {
         setDayCache((prev) => ({
           ...prev,
-          [str]: { meals: prev[str]?.meals ?? [], loading: true, error: '', at: prev[str]?.at },
+          [str]: {
+            meals: prev[str]?.meals ?? [],
+            target: prev[str]?.target ?? null,
+            loading: true,
+            error: '',
+            at: prev[str]?.at,
+          },
         }));
       }
     }
@@ -2794,8 +2888,9 @@ export default function VoiceTrackDashboard() {
         for (const str of needed) {
           const block = json.days[str] || { dettaglio: [] };
           const loaded = (block.dettaglio || []).map((m, i) => ({ ...m, id: m.id || `legacy-${i}` }));
-          updates[str] = { meals: loaded, loading: false, error: '', at };
-          persistDayCacheEntry(str, loaded);
+          const dayTarget = block.target || null;
+          updates[str] = { meals: loaded, target: dayTarget, loading: false, error: '', at };
+          persistDayCacheEntry(str, loaded, dayTarget);
         }
         setDayCache((prev) => ({ ...prev, ...updates }));
       } catch (e) {
@@ -2807,6 +2902,7 @@ export default function VoiceTrackDashboard() {
             const hasMeals = !!cached && Array.isArray(cached.meals);
             next[str] = {
               meals: cached?.meals ?? [],
+              target: cached?.target ?? null,
               loading: false,
               error: hasMeals ? '' : (e.message || 'Impossibile caricare questo giorno'),
               at: cached?.at,
@@ -2825,6 +2921,12 @@ export default function VoiceTrackDashboard() {
     return dayCache[fmtYMD(dateForOffset(o))]?.meals ?? [];
   }, [meals, dayCache]);
 
+  const targetForOffset = useCallback((o) => {
+    if (o === 0) return target;
+    const entry = dayCache[fmtYMD(dateForOffset(o))];
+    return entry?.target || target;
+  }, [target, dayCache]);
+
   const metaForOffset = useCallback((o) => {
     if (o === 0) return { loading: false, error: '' };
     const entry = dayCache[fmtYMD(dateForOffset(o))];
@@ -2832,6 +2934,7 @@ export default function VoiceTrackDashboard() {
   }, [dayCache]);
 
   const displayedMeals = dayOffset === 0 ? meals : (dayCache[selectedDateStr]?.meals ?? []);
+  const dayTarget = dayOffset === 0 ? target : (dayCache[selectedDateStr]?.target || target);
   const historyLoading = dayOffset !== 0 && !!dayCache[selectedDateStr]?.loading;
   const historyError = dayOffset !== 0 ? (dayCache[selectedDateStr]?.error || '') : '';
 
@@ -3171,9 +3274,9 @@ export default function VoiceTrackDashboard() {
 
   const totals = useMemo(() => sumTotals(displayedMeals), [displayedMeals]);
   const grouped = useMemo(() => groupByPasto(displayedMeals), [displayedMeals]);
-  const remaining = target.kcal - totals.kcal;
+  const remaining = dayTarget.kcal - totals.kcal;
   const overTarget = remaining < 0;
-  const pct = Math.min(totals.kcal / Math.max(target.kcal, 1), 1.25);
+  const pct = Math.min(totals.kcal / Math.max(dayTarget.kcal, 1), 1.25);
 
   const macroCalData = [
     { name: 'Proteine', grams: totals.proteine, cal: totals.proteine * 4, color: C.protein },
@@ -3366,7 +3469,7 @@ export default function VoiceTrackDashboard() {
                 meals={mealsForOffset(dayOffset - 1)}
                 loading={metaForOffset(dayOffset - 1).loading}
                 error={metaForOffset(dayOffset - 1).error}
-                target={target}
+                target={targetForOffset(dayOffset - 1)}
               />
             </div>
             <div className="flex flex-col gap-4" style={{ flex: '0 0 100%', minWidth: 0, boxSizing: 'border-box' }}>
@@ -3503,12 +3606,20 @@ export default function VoiceTrackDashboard() {
                     {Math.round(totals.kcal)}
                   </span>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '16px', color: C.inkMuted, marginBottom: '6px' }}>
-                    / {target.kcal} kcal
+                    / {dayTarget.kcal} kcal
                   </span>
                 </div>
                 <button
                   type="button"
-                  onClick={() => { setDiaryCalOpen(false); setTargetDraft(target); setMacroPct(pctFromGrams(target)); setTargetMsg(''); setTargetsOpen((v) => !v); }}
+                  onClick={() => {
+                    setDiaryCalOpen(false);
+                    setTargetDraft(dayTarget);
+                    setMacroPct(pctFromGrams(dayTarget));
+                    setTargetMsg('');
+                    setTargetScope('from');
+                    setTargetRange(null);
+                    setTargetsOpen((v) => !v);
+                  }}
                   style={{
                     color: C.inkMuted,
                     background: C.surfaceRaised,
@@ -3597,13 +3708,51 @@ export default function VoiceTrackDashboard() {
                         </div>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 mt-2" style={{ flexShrink: 0 }}>
-                      <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '9px 14px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
-                        <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
-                      </button>
-                      <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '9px 14px', fontSize: '13px', cursor: 'pointer' }}>
-                        Annulla
-                      </button>
+                    <div className="flex flex-col gap-2 mt-2" style={{ flexShrink: 0 }}>
+                      <div className="flex flex-col gap-1">
+                        {[
+                          { id: 'day', label: 'Solo questo giorno' },
+                          { id: 'from', label: 'Da questo giorno in poi' },
+                          { id: 'range', label: targetRange?.start && targetRange?.end
+                            ? `Intervallo ${Number(targetRange.start.slice(8))}/${Number(targetRange.start.slice(5))}–${Number(targetRange.end.slice(8))}/${Number(targetRange.end.slice(5))}`
+                            : 'Intervallo…' },
+                        ].map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => {
+                              if (opt.id === 'range') {
+                                setTargetScope('range');
+                                setTargetRangeCalOpen(true);
+                              } else {
+                                setTargetScope(opt.id);
+                                setTargetRange(null);
+                              }
+                            }}
+                            style={{
+                              width: '100%',
+                              textAlign: 'left',
+                              background: targetScope === opt.id ? C.surface : 'transparent',
+                              color: targetScope === opt.id ? C.ink : C.inkMuted,
+                              border: targetScope === opt.id ? `1px solid ${C.line}` : '1px solid transparent',
+                              borderRadius: '6px',
+                              padding: '7px 10px',
+                              fontSize: '12px',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={saveTargets} disabled={savingTargets} style={{ background: C.good, color: C.bg, border: 'none', borderRadius: '6px', padding: '9px 14px', fontSize: '13px', fontWeight: 600, cursor: savingTargets ? 'default' : 'pointer', opacity: savingTargets ? 0.6 : 1 }} className="flex items-center gap-1">
+                          <Check size={14} /> {savingTargets ? 'Salvo…' : (config.apiUrl ? 'Salva sul foglio' : 'Salva')}
+                        </button>
+                        <button onClick={() => setTargetsOpen(false)} style={{ background: 'transparent', color: C.inkMuted, border: `1px solid ${C.line}`, borderRadius: '6px', padding: '9px 14px', fontSize: '13px', cursor: 'pointer' }}>
+                          Annulla
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3726,9 +3875,9 @@ export default function VoiceTrackDashboard() {
               </div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', flex: 1 }}>
-              <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={target.proteine} color={C.protein} />
-              <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={target.carboidrati} color={C.carbs} />
-              <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={target.grassi} color={C.fat} />
+              <MacroRow icon={<Beef size={14} color={C.protein} />} label="Proteine" grams={totals.proteine} target={dayTarget.proteine} color={C.protein} />
+              <MacroRow icon={<Wheat size={14} color={C.carbs} />} label="Carboidrati" grams={totals.carboidrati} target={dayTarget.carboidrati} color={C.carbs} />
+              <MacroRow icon={<Droplet size={14} color={C.fat} />} label="Grassi" grams={totals.grassi} target={dayTarget.grassi} color={C.fat} />
             </div>
           </div>
         </div>
@@ -3813,7 +3962,7 @@ export default function VoiceTrackDashboard() {
                   meals={mealsForOffset(dayOffset + 1)}
                   loading={metaForOffset(dayOffset + 1).loading}
                   error={metaForOffset(dayOffset + 1).error}
-                  target={target}
+                  target={targetForOffset(dayOffset + 1)}
                 />
               ) : null}
             </div>
@@ -3822,7 +3971,7 @@ export default function VoiceTrackDashboard() {
 
         {/* Trend: settimana / mese / anno */}
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: '14px', padding: '20px' }}>
-          <div className="flex items-start justify-between" style={{ gap: '10px', marginBottom: '10px' }}>
+          <div className="flex items-start justify-between" style={{ gap: '10px', marginBottom: '8px' }}>
             <span style={{ fontSize: '12px', color: C.inkMuted, flex: 1, minWidth: 0 }}>
               {TREND_TITLE[trendRange]}
             </span>
@@ -3835,7 +3984,7 @@ export default function VoiceTrackDashboard() {
                   color: !rangeReady ? C.inkFaint : rangeOver ? C.alert : C.ink,
                   letterSpacing: '0.02em',
                 }}
-                title={`Consumate / obiettivo ${RANGE_CMP_HINT[trendRange]}`}
+                title={`Consumate / obiettivo ${RANGE_CMP_HINT[trendRange]} · ${statsModeHint}`}
               >
                 {rangeReady ? `${rangeActual} / ${rangeGoal}` : '…'}
               </div>
@@ -3851,6 +4000,73 @@ export default function VoiceTrackDashboard() {
               )}
             </div>
           </div>
+          {trendRange === 'week' && (
+            <div className="flex items-center justify-between" style={{ gap: '8px', marginBottom: '8px' }}>
+              <button
+                type="button"
+                aria-label="Settimana precedente"
+                onClick={() => {
+                  const next = statsWeekOffset - 1;
+                  setStatsWeekOffset(next);
+                  if (config.apiUrl) fetchLive(config, true, next);
+                  else {
+                    // Demo: sposta le date del DEMO_WEEK
+                    setWeek((prev) => prev.map((d) => {
+                      const dt = parseYMD(d.date);
+                      dt.setDate(dt.getDate() - 7);
+                      return { ...d, date: fmtYMD(dt), label: WEEKDAY_IT_BY_JSDAY[dt.getDay()] };
+                    }));
+                  }
+                }}
+                style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <span style={{ fontSize: '11px', color: C.inkMuted, fontFamily: "'IBM Plex Mono', monospace", textAlign: 'center', flex: 1 }}>
+                {(() => {
+                  const a = week?.[0]?.date;
+                  const b = week?.[week.length - 1]?.date;
+                  if (!a || !b) return statsWeekOffset === 0 ? 'Questa settimana' : '…';
+                  const da = parseYMD(a);
+                  const db = parseYMD(b);
+                  const MONTH_SHORT = ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+                  if (da.getMonth() === db.getMonth()) {
+                    return `${da.getDate()}–${db.getDate()} ${MONTH_SHORT[da.getMonth()]}`;
+                  }
+                  return `${da.getDate()} ${MONTH_SHORT[da.getMonth()]} – ${db.getDate()} ${MONTH_SHORT[db.getMonth()]}`;
+                })()}
+              </span>
+              <button
+                type="button"
+                aria-label="Settimana successiva"
+                disabled={statsWeekOffset >= 0}
+                onClick={() => {
+                  if (statsWeekOffset >= 0) return;
+                  const next = statsWeekOffset + 1;
+                  setStatsWeekOffset(next);
+                  if (config.apiUrl) fetchLive(config, true, next);
+                  else {
+                    setWeek((prev) => prev.map((d) => {
+                      const dt = parseYMD(d.date);
+                      dt.setDate(dt.getDate() + 7);
+                      return { ...d, date: fmtYMD(dt), label: WEEKDAY_IT_BY_JSDAY[dt.getDay()] };
+                    }));
+                  }
+                }}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: statsWeekOffset >= 0 ? C.inkFaint : C.inkMuted,
+                  padding: '4px',
+                  cursor: statsWeekOffset >= 0 ? 'default' : 'pointer',
+                  display: 'flex',
+                  opacity: statsWeekOffset >= 0 ? 0.4 : 1,
+                }}
+              >
+                <ChevronRight size={18} />
+              </button>
+            </div>
+          )}
           <div
             className="flex"
             style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '3px', gap: '2px', marginBottom: '10px' }}
@@ -3859,7 +4075,13 @@ export default function VoiceTrackDashboard() {
               <button
                 key={r.id}
                 type="button"
-                onClick={() => setTrendRange(r.id)}
+                onClick={() => {
+                  setTrendRange(r.id);
+                  if (r.id !== 'week' && statsWeekOffset !== 0) {
+                    setStatsWeekOffset(0);
+                    if (config.apiUrl) fetchLive(config, true, 0);
+                  }
+                }}
                 style={{
                   flex: 1,
                   background: trendRange === r.id ? C.surfaceRaised : 'transparent',
@@ -3887,12 +4109,14 @@ export default function VoiceTrackDashboard() {
                   axisLine={{ stroke: C.line }}
                   tickLine={false}
                 />
-                <ReferenceLine y={target.kcal} stroke={C.inkFaint} strokeDasharray="3 3" />
+                {refLineKcal != null && (
+                  <ReferenceLine y={refLineKcal} stroke={C.inkFaint} strokeDasharray="3 3" />
+                )}
                 <Bar dataKey="kcal" radius={[4, 4, 0, 0]} onClick={(d) => goToDate(d?.date)}>
                   {trendData.map((d, i) => (
                     <Cell
                       key={i}
-                      fill={d.kcal > target.kcal ? C.alert : C.good}
+                      fill={d.kcal > barThreshold(d) ? C.alert : C.good}
                       opacity={d.date === selectedDateStr ? 1 : 0.85}
                       stroke={d.date === selectedDateStr ? C.ink : 'none'}
                       strokeWidth={d.date === selectedDateStr ? 1 : 0}
@@ -3913,6 +4137,40 @@ export default function VoiceTrackDashboard() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+          </div>
+          <div
+            className="flex"
+            style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: '8px', padding: '3px', gap: '2px', marginTop: '10px' }}
+          >
+            {[
+              { id: 'history', label: 'STORICO' },
+              { id: 'current', label: 'ATTUALE' },
+            ].map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => setStatsModePersist(m.id)}
+                style={{
+                  flex: 1,
+                  background: statsMode === m.id ? C.surfaceRaised : 'transparent',
+                  color: statsMode === m.id ? C.ink : C.inkMuted,
+                  border: statsMode === m.id ? `1px solid ${C.line}` : '1px solid transparent',
+                  borderRadius: '6px',
+                  padding: '5px 4px',
+                  fontSize: '10px',
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  fontWeight: statsMode === m.id ? 600 : 400,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                }}
+                title={m.id === 'history' ? 'vs piani di quei giorni' : 'vs obiettivo attuale'}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: '10px', color: C.inkFaint, marginTop: '6px', textAlign: 'center' }}>
+            {statsModeHint}
           </div>
         </div>
 
@@ -4535,6 +4793,20 @@ export default function VoiceTrackDashboard() {
           }}
           onClose={() => setDiaryCalOpen(false)}
           line={dayLine(dayOffset)}
+        />
+      )}
+      {targetRangeCalOpen && (
+        <DayJumpCalendar
+          selectedStr={selectedDateStr}
+          mode="month"
+          showModeToggle={false}
+          selectMode="range"
+          onRangeConfirm={({ start, end }) => {
+            setTargetRange({ start, end });
+            setTargetScope('range');
+          }}
+          onClose={() => setTargetRangeCalOpen(false)}
+          line={C.line}
         />
       )}
       {scanCalOpen && scanState === 'asking_qty' && (
@@ -5341,6 +5613,10 @@ function DayJumpCalendar({
   onClose,
   line = C.line,
   showModeToggle = true,
+  selectMode = 'single', // 'single' | 'range'
+  rangeStart = null,
+  rangeEnd = null,
+  onRangeConfirm,
 }) {
   const CAL_MS = 240;
   const MONTH_IT = [
@@ -5350,6 +5626,8 @@ function DayJumpCalendar({
   const selected = parseYMD(selectedStr);
   const todayStr = fmtYMD(new Date());
   const [cursor, setCursor] = useState(() => new Date(selected.getFullYear(), selected.getMonth(), 1));
+  const [draftStart, setDraftStart] = useState(null);
+  const [draftEnd, setDraftEnd] = useState(null);
   // Enter/exit: mount with entered=false, rAF → true; close → false → onClose after transition.
   const [entered, setEntered] = useState(false);
   const closingRef = useRef(false);
@@ -5464,8 +5742,32 @@ function DayJumpCalendar({
   };
 
   const pickDate = (ymd) => {
+    if (selectMode === 'range') {
+      if (!draftStart || (draftStart && draftEnd)) {
+        setDraftStart(ymd);
+        setDraftEnd(null);
+      } else if (ymd < draftStart) {
+        setDraftEnd(draftStart);
+        setDraftStart(ymd);
+      } else {
+        setDraftEnd(ymd);
+      }
+      return;
+    }
     onSelect?.(ymd);
     requestClose();
+  };
+
+  const confirmRange = () => {
+    if (!draftStart || !draftEnd) return;
+    onRangeConfirm?.({ start: draftStart, end: draftEnd });
+    requestClose();
+  };
+
+  const inDraftRange = (ymd) => {
+    if (!draftStart) return false;
+    if (!draftEnd) return ymd === draftStart;
+    return ymd >= draftStart && ymd <= draftEnd;
   };
 
   const cellBtn = (d) => {
@@ -5473,7 +5775,10 @@ function DayJumpCalendar({
       return <div key={`e-${Math.random()}`} style={{ aspectRatio: '1', minHeight: '28px' }} />;
     }
     const ymd = fmtYMD(d);
-    const isSel = ymd === selectedStr;
+    const isSel = selectMode === 'range'
+      ? (ymd === draftStart || ymd === draftEnd)
+      : ymd === selectedStr;
+    const inRange = selectMode === 'range' && inDraftRange(ymd);
     const isToday = ymd === todayStr;
     const inMonth = mode === 'week' || d.getMonth() === cursor.getMonth();
     return (
@@ -5486,7 +5791,7 @@ function DayJumpCalendar({
           minHeight: '28px',
           borderRadius: '8px',
           border: isToday && !isSel ? `1px solid ${C.good}` : '1px solid transparent',
-          background: isSel ? C.good : 'transparent',
+          background: isSel ? C.good : (inRange ? 'rgba(110, 180, 120, 0.25)' : 'transparent'),
           color: isSel ? C.bg : (inMonth ? C.ink : C.inkFaint),
           fontSize: '12px',
           fontFamily: "'IBM Plex Mono', monospace",
@@ -5622,6 +5927,34 @@ function DayJumpCalendar({
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' }}>
           {cells.map((d, i) => (d ? cellBtn(d) : <div key={`pad-${i}`} style={{ aspectRatio: '1', minHeight: '28px' }} />))}
         </div>
+        {selectMode === 'range' && (
+          <div className="flex flex-col gap-2" style={{ marginTop: '4px' }}>
+            <div style={{ fontSize: '11px', color: C.inkMuted, textAlign: 'center' }}>
+              {!draftStart
+                ? 'Tocca l’inizio dell’intervallo'
+                : !draftEnd
+                  ? 'Tocca la fine dell’intervallo'
+                  : `Dal ${draftStart.slice(8)}/${draftStart.slice(5)} al ${draftEnd.slice(8)}/${draftEnd.slice(5)}`}
+            </div>
+            <button
+              type="button"
+              disabled={!draftStart || !draftEnd}
+              onClick={confirmRange}
+              style={{
+                background: draftStart && draftEnd ? C.good : C.line,
+                color: draftStart && draftEnd ? C.bg : C.inkFaint,
+                border: 'none',
+                borderRadius: '8px',
+                padding: '9px 12px',
+                fontSize: '13px',
+                fontWeight: 600,
+                cursor: draftStart && draftEnd ? 'pointer' : 'default',
+              }}
+            >
+              Conferma intervallo
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

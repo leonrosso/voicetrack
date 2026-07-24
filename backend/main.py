@@ -16,10 +16,13 @@ from sheets_client import (
     get_all_meal_rows,
     get_weekly_totals,
     get_config_targets,
+    get_target_history,
+    target_for,
     set_config_targets,
+    apply_target_span,
     update_meal_row,
     delete_meal_row,
-    pasto_from_hour,
+    normalize_tipo_pasto,
     sheet_health,
     SheetConfigError,
     list_catalog,
@@ -37,7 +40,7 @@ TZ_ITALY = timezone(timedelta(hours=2))
 API_KEY = os.environ.get("VOICETRACK_API_KEY", "")
 
 # Versione applicativa, esposta da /health (aggiornare a ogni deploy significativo)
-APP_VERSION = os.environ.get("APP_VERSION", "deploy5-day-meals-2026-07-23")
+APP_VERSION = os.environ.get("APP_VERSION", "deploy5-tipo-pasto-2026-07-24")
 
 # Open Food Facts (Deploy 4, §5 del Piano di Consolidamento).
 # API comunitaria senza SLA (§3.9 del registro): timeout corto e
@@ -247,6 +250,19 @@ def _attach_declared_meta(payload: dict, declared_at: datetime, etichetta) -> di
     return payload
 
 
+def _resolve_tipo_pasto(body, llm_result=None):
+    """
+    Precedenza tipo pasto: LLM (voce) → body client (tipo_pasto / meal_type) → None.
+    None = non dichiarato → in scrittura L vuota → in lettura fallback sull'ora.
+    """
+    llm_result = llm_result or {}
+    t = normalize_tipo_pasto(llm_result.get("tipo_pasto"))
+    if t:
+        return t
+    body = body or {}
+    return normalize_tipo_pasto(body.get("tipo_pasto") or body.get("meal_type"))
+
+
 @functions_framework.http
 def voicetrack(request):
     """
@@ -382,12 +398,17 @@ def _handle_log_meal(request):
         recorded_at, declared_at, etichetta, _from_speech = resolved
 
         if llm_result.get("status") == "ok" and llm_result.get("items"):
+            tipo = _resolve_tipo_pasto(body, llm_result)
             append_meal_rows(
                 llm_result["items"],
                 recorded_at=recorded_at,
                 declared_at=declared_at,
                 fonte=fonte,
+                tipo_pasto=tipo,
             )
+            if tipo:
+                llm_result = dict(llm_result)
+                llm_result["tipo_pasto"] = tipo
 
         return _json_response(_attach_declared_meta(llm_result, declared_at, etichetta))
 
@@ -578,11 +599,13 @@ def _handle_scan_barcode(request):
             "grassi": round(per100["grassi"] * fattore, 1),
         }
 
+        tipo = _resolve_tipo_pasto(body)
         append_meal_rows(
             [item],
             recorded_at=recorded_at,
             declared_at=declared_at,
             fonte=fonte,
+            tipo_pasto=tipo,
         )
 
         # Upsert silenzioso nel catalogo personale (barcode + nutrienti).
@@ -603,12 +626,15 @@ def _handle_scan_barcode(request):
             f"Registrato: {nome}, {round(grammi)} grammi. "
             f"{round(item['kcal'])} calorie, {round(item['proteine'])} grammi di proteine."
         )
-        return _json_response(_attach_declared_meta({
+        payload = {
             "status": "ok",
             "items": [item],
             "totale": {k: item[k] for k in ("kcal", "proteine", "carboidrati", "grassi")},
             "riepilogo_vocale": riepilogo,
-        }, declared_at, etichetta))
+        }
+        if tipo:
+            payload["tipo_pasto"] = tipo
+        return _json_response(_attach_declared_meta(payload, declared_at, etichetta))
 
     except SheetConfigError as e:
         logging.error(f"[scan_barcode] configurazione foglio errata: {e}")
@@ -635,7 +661,9 @@ def _handle_scan_barcode(request):
 # ---------------------------------------------------------------------------
 
 # Campi che il client PWA puo' modificare via /update_meal.
-_UPDATABLE_FIELDS = ("alimento", "grammi", "kcal", "proteine", "carboidrati", "grassi")
+_UPDATABLE_FIELDS = (
+    "alimento", "grammi", "kcal", "proteine", "carboidrati", "grassi", "tipo_pasto",
+)
 
 
 def _handle_update_meal(request):
@@ -744,8 +772,9 @@ def _handle_daily_summary(request):
         rows = get_today_rows(target_date)
         tot = _totals(rows)
 
-        # Target letti dalla tab Config (creata coi default se non esiste)
-        target = get_config_targets()
+        # Target del giorno richiesto (storia), non solo il corrente
+        history = get_target_history()
+        target = target_for(target_date, history)
 
         kcal_rimaste = round(target["kcal"] - tot["kcal"], 1)
         proteine_rimaste = round(target["proteine"] - tot["proteine"], 1)
@@ -800,7 +829,7 @@ def _handle_day_meals(request):
     """
     Endpoint GET /day_meals?dates=YYYY-MM-DD,YYYY-MM-DD,...
     Batch per la PWA Diario: una lettura foglio, pasti di 1–7 date.
-    Niente TTS / target (restano su /daily_summary e /dashboard).
+    Per ogni data include anche `target` risolto dalla storia (valid_from).
     """
     try:
         raw = (request.args.get("dates") or "").strip()
@@ -818,6 +847,7 @@ def _handle_day_meals(request):
             }, 400)
 
         wanted = []
+        wanted_dates = []
         seen = set()
         for p in parts:
             try:
@@ -831,13 +861,20 @@ def _handle_day_meals(request):
             if key not in seen:
                 seen.add(key)
                 wanted.append(key)
+                wanted_dates.append(d)
 
         all_rows = get_all_meal_rows()
         by_date = {}
         for m in all_rows:
             by_date.setdefault(m["date"], []).append(m)
 
-        days = {key: {"dettaglio": by_date.get(key, [])} for key in wanted}
+        history = get_target_history()
+        days = {}
+        for key, d in zip(wanted, wanted_dates):
+            days[key] = {
+                "dettaglio": by_date.get(key, []),
+                "target": target_for(d, history),
+            }
         return _json_response({"status": "ok", "days": days})
 
     except SheetConfigError as e:
@@ -857,10 +894,24 @@ def _handle_dashboard(request):
     Endpoint GET /dashboard
     Ritorna il pacchetto dati completo per la webapp: pasti di oggi,
     trend (settimana / mese / anno), target. Una sola lettura del foglio pasti.
+
+    Query: week_offset=N (default 0, intero <= 0). N=0 → ultimi 7 giorni
+    (today-6…today); N=-1 → i 7 giorni precedenti, ecc.
     """
     try:
         today = datetime.now(TZ_ITALY).date()
         today_str = today.strftime("%Y-%m-%d")
+
+        raw_off = (request.args.get("week_offset") or "0").strip()
+        try:
+            week_offset = int(raw_off)
+        except ValueError:
+            return _json_response({
+                "status": "error",
+                "message": "week_offset deve essere un intero <= 0",
+            }, 400)
+        if week_offset > 0:
+            week_offset = 0
 
         all_rows = get_all_meal_rows()
 
@@ -890,35 +941,49 @@ def _handle_dashboard(request):
 
         from sheets_client import WEEKDAY_IT, MONTH_IT
 
-        # Ultimi 7 giorni (kcal giornaliere)
+        history = get_target_history()
+
+        # Finestra settimanale: 7 giorni che terminano in today + week_offset*7
+        # offset 0 → today-6…today; offset -1 → today-13…today-7; …
+        week_end = today + timedelta(days=week_offset * 7)
+        week_start = week_end - timedelta(days=6)
         settimana = []
         for j in range(6, -1, -1):
-            d = today - timedelta(days=j)
+            d = week_end - timedelta(days=j)
             d_str = d.strftime("%Y-%m-%d")
+            t_day = target_for(d, history)
             settimana.append({
                 "label": WEEKDAY_IT[d.weekday()],
                 "date": d_str,
                 "kcal": round(kcal_by_date.get(d_str, 0), 1),
+                "target_kcal": t_day["kcal"],
             })
 
         # Ultime 5 settimane rolling (7 giorni ciascuna): media giornaliera
         # sul bucket (giorni senza pasti contano 0). date = inizio bucket.
+        # target_kcal = media dei target giornalieri del bucket.
         mensile = []
         for w in range(4, -1, -1):
             start = today - timedelta(days=(w * 7) + 6)
             day_totals = []
+            day_targets = []
             for i in range(7):
                 d = start + timedelta(days=i)
                 day_totals.append(kcal_by_date.get(d.strftime("%Y-%m-%d"), 0))
+                day_targets.append(target_for(d, history)["kcal"])
             avg = round(sum(day_totals) / 7, 1) if any(day_totals) else 0
+            avg_tgt = round(sum(day_targets) / 7, 1) if day_targets else 0
             mensile.append({
                 "label": f"{start.day}/{start.month}",
                 "date": start.strftime("%Y-%m-%d"),
                 "kcal": avg,
+                "target_kcal": avg_tgt,
             })
 
         # Ultimi 12 mesi di calendario: media giornaliera sui giorni con
         # almeno un pasto (0 se nessun pasto nel mese).
+        # target_kcal = media dei target su tutti i giorni del mese nel range
+        # (mese corrente: fino a oggi), allineata al peso usato per actual.
         annuale = []
         for m_offset in range(11, -1, -1):
             # Primo giorno del mese m_offset mesi fa
@@ -933,17 +998,23 @@ def _handle_dashboard(request):
             else:
                 month_end = date(y, mo + 1, 1) - timedelta(days=1)
             logged = []
+            target_days = []
             d = month_start
             while d <= month_end:
                 d_str = d.strftime("%Y-%m-%d")
                 if d_str in kcal_by_date:
                     logged.append(kcal_by_date[d_str])
+                # Peso target: mese corrente solo fino a oggi
+                if d <= today:
+                    target_days.append(target_for(d, history)["kcal"])
                 d += timedelta(days=1)
             avg = round(sum(logged) / len(logged), 1) if logged else 0
+            avg_tgt = round(sum(target_days) / len(target_days), 1) if target_days else 0
             annuale.append({
                 "label": MONTH_IT[mo - 1],
                 "date": month_start.strftime("%Y-%m-%d"),
                 "kcal": avg,
+                "target_kcal": avg_tgt,
             })
 
         target = get_config_targets()
@@ -959,6 +1030,10 @@ def _handle_dashboard(request):
             "storico_mensile": mensile,
             "storico_annuale": annuale,
             "target": target,
+            "target_history": history,
+            "week_offset": week_offset,
+            "week_start": week_start.strftime("%Y-%m-%d"),
+            "week_end": week_end.strftime("%Y-%m-%d"),
         })
 
     except SheetConfigError as e:
@@ -971,10 +1046,15 @@ def _handle_dashboard(request):
 
 
 def _handle_get_config(request):
-    """Endpoint GET /config — ritorna i target giornalieri."""
+    """Endpoint GET /config — target corrente + storia fasce."""
     try:
         target = get_config_targets()
-        return _json_response({"status": "ok", "target": target})
+        history = get_target_history()
+        return _json_response({
+            "status": "ok",
+            "target": target,
+            "target_history": history,
+        })
     except Exception as e:
         logging.error(f"[config:get] errore: {e}", exc_info=True)
         return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
@@ -983,14 +1063,83 @@ def _handle_get_config(request):
 def _handle_set_config(request):
     """
     Endpoint POST /config
-    Body JSON: {"target": {"kcal":2200,"proteine":165,"carboidrati":220,"grassi":70}}
-    (accetta anche i 4 campi al primo livello, per comodita').
+    Body JSON: {
+      "target": {"kcal":2200,"proteine":165,"carboidrati":220,"grassi":70},
+      "mode": "from"|"day"|"range",   # default from
+      "start": "YYYY-MM-DD",          # default oggi (o da effective/valid_from)
+      "end": "YYYY-MM-DD"             # obbligatorio se mode=range
+    }
+    Compat: effective today|tomorrow oppure valid_from → mode=from.
     """
     try:
         body = request.get_json(silent=True) or {}
         target = body.get("target", body)
-        saved = set_config_targets(target)
-        return _json_response({"status": "ok", "target": saved})
+        today = _now_italy().date()
+
+        def _parse_iso(raw, field):
+            s = str(raw or "").strip()
+            if not s:
+                return None
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(f"Campo '{field}' non valido. Usa YYYY-MM-DD.")
+
+        try:
+            start = _parse_iso(body.get("start"), "start")
+            end = _parse_iso(body.get("end"), "end")
+            valid_from = _parse_iso(body.get("valid_from"), "valid_from")
+        except ValueError as e:
+            return _json_response({"status": "error", "message": str(e)}, 400)
+
+        mode = str(body.get("mode") or "").strip().lower()
+        effective = str(body.get("effective") or "").strip().lower()
+
+        # Compat legacy
+        if not mode:
+            if valid_from is not None:
+                mode = "from"
+                start = valid_from
+            elif effective in ("tomorrow", "domani"):
+                mode = "from"
+                start = today + timedelta(days=1)
+            elif effective in ("today", "oggi") or effective == "":
+                mode = "from"
+                if start is None:
+                    start = today
+            else:
+                mode = "from"
+                if start is None:
+                    start = today
+
+        if start is None:
+            start = today
+
+        if mode in ("day", "solo", "single"):
+            mode = "day"
+            end = start
+        elif mode in ("range", "intervallo"):
+            mode = "range"
+            if end is None:
+                return _json_response({
+                    "status": "error",
+                    "message": "Per mode=range serve 'end' (YYYY-MM-DD)",
+                }, 400)
+        else:
+            mode = "from"
+
+        saved = apply_target_span(target, mode=mode, start=start, end=end)
+        history = get_target_history()
+        return _json_response({
+            "status": "ok",
+            "target": saved,
+            "target_history": history,
+            "mode": mode,
+            "start": start.strftime("%Y-%m-%d"),
+            "end": (end.strftime("%Y-%m-%d") if end is not None and mode != "from" else None),
+        })
+    except ValueError as e:
+        return _json_response({"status": "error", "message": str(e)}, 400)
     except Exception as e:
         logging.error(f"[config:set] errore: {e}", exc_info=True)
         return _json_response({"status": "error", "message": f"Errore: {str(e)}"}, 500)
@@ -1344,11 +1493,13 @@ def _handle_log_catalog(request):
         }
 
         now_ts = recorded_at.strftime("%Y-%m-%d %H:%M:%S")
+        tipo = _resolve_tipo_pasto(body)
         append_meal_rows(
             [item],
             recorded_at=recorded_at,
             declared_at=declared_at,
             fonte=fonte,
+            tipo_pasto=tipo,
         )
 
         # Upsert / bump catalogo
@@ -1370,12 +1521,15 @@ def _handle_log_catalog(request):
             f"Registrato: {nome}, {round(grammi)} grammi. "
             f"{round(item['kcal'])} calorie, {round(item['proteine'])} grammi di proteine."
         )
-        return _json_response(_attach_declared_meta({
+        payload = {
             "status": "ok",
             "items": [item],
             "totale": {k: item[k] for k in ("kcal", "proteine", "carboidrati", "grassi")},
             "riepilogo_vocale": riepilogo,
-        }, declared_at, etichetta))
+        }
+        if tipo:
+            payload["tipo_pasto"] = tipo
+        return _json_response(_attach_declared_meta(payload, declared_at, etichetta))
 
     except SheetConfigError as e:
         logging.error(f"[log_catalog] foglio: {e}")

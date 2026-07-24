@@ -18,11 +18,11 @@ voicetrack/
 2. Rinomina il primo foglio (tab in basso) in **"Pasti"**
 3. Nella riga 1, inserisci le intestazioni:
 
-| A | B | C | D | E | F | G | H | I | J | K |
-|---|---|---|---|---|---|---|---|---|---|---|
-| timestamp | alimento | grammi | kcal | proteine | carboidrati | grassi | fonte | note | id | data_dichiarata |
+| A | B | C | D | E | F | G | H | I | J | K | L |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| timestamp | alimento | grammi | kcal | proteine | carboidrati | grassi | fonte | note | id | data_dichiarata | tipo_pasto |
 
-`timestamp` = quando il pasto e' stato registrato. `data_dichiarata` = giorno a cui appartiene il pasto (coincide con timestamp se non specificato; mezzogiorno del giorno scelto se backdatato). Le righe vecchie senza K restano valide in lettura.
+`timestamp` = quando il pasto e' stato registrato. `data_dichiarata` = giorno a cui appartiene il pasto (coincide con timestamp se non specificato; mezzogiorno del giorno scelto se backdatato). `tipo_pasto` = colazione|pranzo|spuntino|cena se dichiarato a voce/client; vuoto → in lettura si deriva dall'ora. Le righe vecchie senza K/L restano valide in lettura.
 
 4. Assicurati che il foglio sia condiviso con l'email del Service Account (quella che finisce con `@...iam.gserviceaccount.com`)
 
