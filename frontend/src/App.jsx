@@ -214,6 +214,19 @@ const parseYMD = (str) => {
   return new Date(y, m - 1, d);
 };
 
+// Confronta serie trend (settimana/mese/anno) per evitare setState inutili
+// sul poll 20s → niente re-animazione Recharts / flash della card Statistiche.
+function trendSeriesEqual(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.date !== b[i]?.date) return false;
+    if (Number(a[i]?.kcal) !== Number(b[i]?.kcal)) return false;
+    if (Number(a[i]?.target_kcal ?? NaN) !== Number(b[i]?.target_kcal ?? NaN)) return false;
+  }
+  return true;
+}
+
 // Indicizzato su Date.getDay() (0 = domenica), stesse etichette di WEEKDAY_IT
 // nel backend (che invece indicizza su weekday(), 0 = lunedi').
 const WEEKDAY_IT_BY_JSDAY = ['dom', 'lun', 'mar', 'mer', 'gio', 'ven', 'sab'];
@@ -899,6 +912,8 @@ export default function VoiceTrackDashboard() {
   const [statsWeekOffset, setStatsWeekOffset] = useState(0);
   const statsWeekOffsetRef = useRef(0);
   statsWeekOffsetRef.current = statsWeekOffset;
+  const dashFetchSeqRef = useRef(0);
+  const dashAbortRef = useRef(null);
   const [storageReady, setStorageReady] = useState(false);
   const [targetsOpen, setTargetsOpen] = useState(false);
   const [targetsMounted, setTargetsMounted] = useState(false);
@@ -957,39 +972,78 @@ export default function VoiceTrackDashboard() {
   const fetchLive = useCallback(async (cfg, silent = false, weekOff) => {
     if (!silent) setStatus('loading');
     setErrorMsg('');
+    // weekOff esplicito: aggiorna subito il ref (prima del re-render) cosi'
+    // poll/altre fetch non ripartono con l'offset vecchio.
+    if (weekOff !== undefined) {
+      statsWeekOffsetRef.current = weekOff;
+    }
+    const off = weekOff !== undefined ? weekOff : statsWeekOffsetRef.current;
+    const seq = ++dashFetchSeqRef.current;
+    if (dashAbortRef.current) {
+      try { dashAbortRef.current.abort(); } catch (e) {}
+    }
+    const ac = new AbortController();
+    dashAbortRef.current = ac;
     try {
       const base = cfg.apiUrl.replace(/\/$/, '');
-      const off = weekOff !== undefined ? weekOff : statsWeekOffsetRef.current;
       const res = await fetch(`${base}/dashboard?week_offset=${off}`, {
         headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
+        signal: ac.signal,
       });
       if (!res.ok) throw new Error(`Risposta ${res.status} dal server`);
       const json = await res.json();
+      // Risposta superata da un fetch piu' recente (o abort): non toccare lo stato.
+      if (seq !== dashFetchSeqRef.current) return;
       const loadedTarget = json?.target ?? DEMO_TARGET;
       const nextMeals = json?.oggi?.pasti ?? [];
       const nextWeek = json?.storico_settimanale ?? DEMO_WEEK;
       const nextMonth = json?.storico_mensile ?? DEMO_MONTH;
       const nextYear = json?.storico_annuale ?? DEMO_YEAR;
+      // Backend senza week_offset (CF vecchia): applica la serie solo a offset 0
+      // (la CF vecchia ignora la query e torna sempre gli ultimi 7 gg).
+      // NON usare `off === ref`: dopo un click a -1 ref==off e si riapplicava
+      // la settimana corrente, annullando il pager.
+      const respOff = json?.week_offset;
+      const weekOk = typeof respOff === 'number'
+        ? respOff === statsWeekOffsetRef.current
+        : off === 0;
       setMeals(nextMeals);
-      setWeek(nextWeek);
-      setMonth(nextMonth);
-      setYear(nextYear);
+      if (weekOk) {
+        setWeek((prev) => (trendSeriesEqual(prev, nextWeek) ? prev : nextWeek));
+      }
+      setMonth((prev) => (trendSeriesEqual(prev, nextMonth) ? prev : nextMonth));
+      setYear((prev) => (trendSeriesEqual(prev, nextYear) ? prev : nextYear));
       setTarget(loadedTarget);
       setTargetDraft((prev) => (targetsOpen ? prev : loadedTarget));
       setStatus('live');
       setLastSync(new Date());
-      // Salva l'ultimo dato buono in cache: al prossimo reload lo mostriamo
-      // subito (istantaneo) mentre la Cloud Function esce dal cold start.
+      // Cache anti cold-start: a offset ≠ 0 non sovrascrivere la week corrente in cache.
       try {
+        let weekForCache = nextWeek;
+        if (!(weekOk && statsWeekOffsetRef.current === 0)) {
+          weekForCache = undefined;
+          try {
+            const prev = await storage.get('vt-cache');
+            if (prev?.value) {
+              const parsed = JSON.parse(prev.value);
+              if (Array.isArray(parsed?.week)) weekForCache = parsed.week;
+            }
+          } catch (e) {}
+        }
         await storage.set('vt-cache', JSON.stringify({
-          meals: nextMeals, week: nextWeek, month: nextMonth, year: nextYear,
-          target: loadedTarget, at: Date.now(),
+          meals: nextMeals,
+          week: weekForCache ?? nextWeek,
+          month: nextMonth,
+          year: nextYear,
+          target: loadedTarget,
+          at: Date.now(),
         }));
       } catch (e) {}
     } catch (e) {
+      if (e?.name === 'AbortError') return;
       // In un refresh silenzioso non buttiamo giu' l'app sui dati demo:
       // teniamo l'ultimo dato buono e segnaliamo solo l'errore.
-      if (!silent) {
+      if (!silent && seq === dashFetchSeqRef.current) {
         setMeals(DEMO_MEALS_TODAY);
         setWeek(DEMO_WEEK);
         setMonth(DEMO_MONTH);
@@ -997,7 +1051,9 @@ export default function VoiceTrackDashboard() {
         setTarget(DEMO_TARGET);
         setStatus('error');
       }
-      setErrorMsg(e.message || 'Impossibile raggiungere il backend');
+      if (seq === dashFetchSeqRef.current) {
+        setErrorMsg(e.message || 'Impossibile raggiungere il backend');
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetsOpen]);
@@ -4007,6 +4063,7 @@ export default function VoiceTrackDashboard() {
                 aria-label="Settimana precedente"
                 onClick={() => {
                   const next = statsWeekOffset - 1;
+                  statsWeekOffsetRef.current = next;
                   setStatsWeekOffset(next);
                   if (config.apiUrl) fetchLive(config, true, next);
                   else {
@@ -4043,6 +4100,7 @@ export default function VoiceTrackDashboard() {
                 onClick={() => {
                   if (statsWeekOffset >= 0) return;
                   const next = statsWeekOffset + 1;
+                  statsWeekOffsetRef.current = next;
                   setStatsWeekOffset(next);
                   if (config.apiUrl) fetchLive(config, true, next);
                   else {
@@ -4078,6 +4136,7 @@ export default function VoiceTrackDashboard() {
                 onClick={() => {
                   setTrendRange(r.id);
                   if (r.id !== 'week' && statsWeekOffset !== 0) {
+                    statsWeekOffsetRef.current = 0;
                     setStatsWeekOffset(0);
                     if (config.apiUrl) fetchLive(config, true, 0);
                   }
@@ -4112,7 +4171,12 @@ export default function VoiceTrackDashboard() {
                 {refLineKcal != null && (
                   <ReferenceLine y={refLineKcal} stroke={C.inkFaint} strokeDasharray="3 3" />
                 )}
-                <Bar dataKey="kcal" radius={[4, 4, 0, 0]} onClick={(d) => goToDate(d?.date)}>
+                <Bar
+                  dataKey="kcal"
+                  radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
+                  onClick={(d) => goToDate(d?.date)}
+                >
                   {trendData.map((d, i) => (
                     <Cell
                       key={i}

@@ -14,6 +14,22 @@
 
 ---
 
+## 2026-07-24 — Fix weekOk + anti-flash Statistiche (Cursor)
+**Fatto:** corretto gate `weekOk` (CF senza campo: applica settimana solo se `off===0`, non più `off===ref` che riapplicava la settimana corrente dopo freccia ←); `trendSeriesEqual` evita `setWeek`/`setMonth`/`setYear` se dati invariati (poll 20s); `isAnimationActive={false}` sul Bar Statistiche; `APP_VERSION` → `deploy5-week-offset-2026-07-24`.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) settimane passate che restavano correnti + flash periodico card; scorrimento reale ancora dipende da redeploy CF con `week_offset` in JSON.
+**Prossimo passo:** redeploy CF (verificare `/health` = `deploy5-week-offset-2026-07-24` e curl `week_offset=0` vs `-1` con date diverse) + deploy/refresh PWA; test frecce su telefono.
+
+---
+
+## 2026-07-24 — Fix race pager settimane / flash Statistiche (Cursor)
+**Fatto:** `fetchLive` aborta la richiesta dashboard precedente (`AbortController` + seq); aggiorna `statsWeekOffsetRef` subito al cambio offset; applica `setWeek` solo se `week_offset` della risposta coincide col ref (con CF vecchia senza campo, non sovrascrive la settimana se offset ≠ 0); `vt-cache` salva la week solo a offset 0.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) flash/rimbalzo frecce da race poll vs pager; scorrimento reale resta dipendente da deploy CF `week_offset`.
+**Prossimo passo:** redeploy CF (comando con `--env-vars-file .env.yaml` corretto) + test frecce.
+
+---
+
 ## 2026-07-24 — Target dal Diario (ambiti) + pager settimane Statistiche (Cursor)
 **Fatto:** (1) `apply_target_span` su TargetHistory: mode `from` / `day` / `range` con riscrittura foglio; POST `/config` body `mode+start[+end]` (compat `effective`/`valid_from`). (2) Obiettivi PWA: chip Solo questo giorno / Da questo giorno in poi / Intervallo… (calendario range); bozza da `dayTarget`; ancora = giorno Diario. (3) `/dashboard?week_offset=N` + frecce settimane in vista Settimana.
 **Nuove superfici/config:** POST `/config` ambiti; query `week_offset`; calendario `selectMode=range`.
