@@ -14,6 +14,22 @@
 
 ---
 
+## 2026-07-24 — Pager settimane veloce: prefetch + week_only (Cursor)
+**Fatto:** `/dashboard` restituisce `weeks_by_offset` (12 finestre rolling, costo quasi nullo post-Sheets); query `week_only=1` per miss oltre la cache. PWA: seed cache da `weeks_by_offset`; pager usa cache (istantaneo) o `fetchWeekOnly`; prefetch adiacenti in background. `APP_VERSION` → `deploy5-weeks-prefetch-2026-07-24`.
+**Nuove superfici/config:** `weeks_by_offset` in JSON dashboard; `?week_only=1`.
+**Bug aperti/chiusi:** chiuso (codice) lentezza frecce (full dashboard a ogni click).
+**Prossimo passo:** redeploy CF → `/health` = `deploy5-weeks-prefetch-2026-07-24`; refresh PWA; frecce ← su ultime ~12 sett. devono essere istantanee.
+
+---
+
+## 2026-07-24 — Pager frecce: poll non aborta + cache offset (Cursor)
+**Fatto:** il poll 20s abortiva il fetch delle frecce (soprattutto in retry 503) → settimane “non caricano”. Ora il poll **salta** se `/dashboard` è già in volo; solo il pager abortisce e riparte. `goStatsWeek`: cache per offset, placeholder kcal=0 + loading (opacità/`…`), `sleepAbortable` sui retry.
+**Nuove superfici/config:** nessuna.
+**Bug aperti/chiusi:** chiuso (codice) frecce avanti/indietro interrotte dal poll.
+**Prossimo passo:** test su `npm run dev` / telefono — freccia ← → date subito, barre si riempiono, freccia → usa cache.
+
+---
+
 ## 2026-07-24 — /dashboard 503 + pager settimane (Cursor)
 **Fatto:** causa reale: `/dashboard` in produzione rispondeva **503** ~9/10 (quando passava, `week_offset=-1` era corretto: 11–17 lug). Alleggerito handler: `target_for(today, history)` al posto di `get_config_targets()` (evita write Config sotto poll) e tolto `target_history` dalla risposta (PWA non lo usa). PWA: retry 502/503/429, `cache: no-store`, pager optimistic (`shiftWeekSeries`), `weekOk` vs `off` della richiesta, niente sync ref←state a ogni render, asse con giorno del mese. `APP_VERSION` → `deploy5-dash-light-2026-07-24`.
 **Nuove superfici/config:** nessuna.

@@ -40,7 +40,7 @@ TZ_ITALY = timezone(timedelta(hours=2))
 API_KEY = os.environ.get("VOICETRACK_API_KEY", "")
 
 # Versione applicativa, esposta da /health (aggiornare a ogni deploy significativo)
-APP_VERSION = os.environ.get("APP_VERSION", "deploy5-dash-light-2026-07-24")
+APP_VERSION = os.environ.get("APP_VERSION", "deploy5-weeks-prefetch-2026-07-24")
 
 # Open Food Facts (Deploy 4, §5 del Piano di Consolidamento).
 # API comunitaria senza SLA (§3.9 del registro): timeout corto e
@@ -895,8 +895,11 @@ def _handle_dashboard(request):
     Ritorna il pacchetto dati completo per la webapp: pasti di oggi,
     trend (settimana / mese / anno), target. Una sola lettura del foglio pasti.
 
-    Query: week_offset=N (default 0, intero <= 0). N=0 → ultimi 7 giorni
-    (today-6…today); N=-1 → i 7 giorni precedenti, ecc.
+    Query:
+      week_offset=N (default 0, intero <= 0). N=0 → ultimi 7 giorni
+        (today-6…today); N=-1 → i 7 giorni precedenti, ecc.
+      week_only=1 → risposta leggera: solo la finestra settimanale richiesta
+        (niente oggi/mese/anno). Usato dal pager Statistiche.
     """
     try:
         today = datetime.now(TZ_ITALY).date()
@@ -913,7 +916,50 @@ def _handle_dashboard(request):
         if week_offset > 0:
             week_offset = 0
 
+        week_only = (request.args.get("week_only") or "").strip().lower() in (
+            "1", "true", "yes",
+        )
+
         all_rows = get_all_meal_rows()
+
+        # Trend dalle stesse righe gia' lette
+        kcal_by_date = {}
+        for m in all_rows:
+            kcal_by_date[m["date"]] = kcal_by_date.get(m["date"], 0) + m["kcal"]
+
+        from sheets_client import WEEKDAY_IT, MONTH_IT
+
+        history = get_target_history()
+
+        def build_week(wo: int) -> tuple[list, date, date]:
+            """7 giorni che terminano in today + wo*7."""
+            w_end = today + timedelta(days=wo * 7)
+            w_start = w_end - timedelta(days=6)
+            series = []
+            for j in range(6, -1, -1):
+                d = w_end - timedelta(days=j)
+                d_str = d.strftime("%Y-%m-%d")
+                t_day = target_for(d, history)
+                series.append({
+                    "label": WEEKDAY_IT[d.weekday()],
+                    "date": d_str,
+                    "kcal": round(kcal_by_date.get(d_str, 0), 1),
+                    "target_kcal": t_day["kcal"],
+                })
+            return series, w_start, w_end
+
+        settimana, week_start, week_end = build_week(week_offset)
+
+        # Pager: solo la settimana richiesta (Sheets gia' in cache TTL → risposta corta).
+        if week_only:
+            return _json_response({
+                "status": "ok",
+                "storico_settimanale": settimana,
+                "week_offset": week_offset,
+                "week_start": week_start.strftime("%Y-%m-%d"),
+                "week_end": week_end.strftime("%Y-%m-%d"),
+                "week_only": True,
+            })
 
         # Pasti di oggi. `id` = UUID reale della riga (per tap-to-edit /
         # swipe-to-delete). Le righe storiche senza id ricevono un fallback
@@ -934,30 +980,12 @@ def _handle_dashboard(request):
                 "fonte": m["fonte"] or "voce",
             })
 
-        # Trend dalle stesse righe gia' lette
-        kcal_by_date = {}
-        for m in all_rows:
-            kcal_by_date[m["date"]] = kcal_by_date.get(m["date"], 0) + m["kcal"]
-
-        from sheets_client import WEEKDAY_IT, MONTH_IT
-
-        history = get_target_history()
-
-        # Finestra settimanale: 7 giorni che terminano in today + week_offset*7
-        # offset 0 → today-6…today; offset -1 → today-13…today-7; …
-        week_end = today + timedelta(days=week_offset * 7)
-        week_start = week_end - timedelta(days=6)
-        settimana = []
-        for j in range(6, -1, -1):
-            d = week_end - timedelta(days=j)
-            d_str = d.strftime("%Y-%m-%d")
-            t_day = target_for(d, history)
-            settimana.append({
-                "label": WEEKDAY_IT[d.weekday()],
-                "date": d_str,
-                "kcal": round(kcal_by_date.get(d_str, 0), 1),
-                "target_kcal": t_day["kcal"],
-            })
+        # Prefetch gratis (stesse righe in RAM): ultime 12 finestre rolling
+        # cosi' il pager Statistiche e' istantaneo senza altre /dashboard.
+        weeks_by_offset = {}
+        for wo in range(0, -12, -1):
+            series, _, _ = build_week(wo)
+            weeks_by_offset[str(wo)] = series
 
         # Ultime 5 settimane rolling (7 giorni ciascuna): media giornaliera
         # sul bucket (giorni senza pasti contano 0). date = inizio bucket.
@@ -1032,6 +1060,7 @@ def _handle_dashboard(request):
             "storico_settimanale": settimana,
             "storico_mensile": mensile,
             "storico_annuale": annuale,
+            "weeks_by_offset": weeks_by_offset,
             "target": target,
             "week_offset": week_offset,
             "week_start": week_start.strftime("%Y-%m-%d"),

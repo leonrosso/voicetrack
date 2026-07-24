@@ -240,6 +240,26 @@ function shiftWeekSeries(week, dayDelta) {
 }
 
 /** fetch con retry su 502/503/429 (CF spesso 503 sotto carico Sheets). */
+function sleepAbortable(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      reject(err);
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    if (!signal) return;
+    const onAbort = () => {
+      clearTimeout(t);
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      reject(err);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function fetchWithRetry(url, options = {}, { retries = 2, baseDelayMs = 1200 } = {}) {
   const { signal } = options;
   let lastErr;
@@ -254,7 +274,7 @@ async function fetchWithRetry(url, options = {}, { retries = 2, baseDelayMs = 12
       if (res.status === 502 || res.status === 503 || res.status === 429) {
         lastErr = new Error(`Risposta ${res.status} dal server`);
         if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+          await sleepAbortable(baseDelayMs * (attempt + 1), signal);
           continue;
         }
         throw lastErr;
@@ -264,7 +284,7 @@ async function fetchWithRetry(url, options = {}, { retries = 2, baseDelayMs = 12
       if (e?.name === 'AbortError') throw e;
       lastErr = e;
       if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, baseDelayMs * (attempt + 1)));
+        await sleepAbortable(baseDelayMs * (attempt + 1), signal);
         continue;
       }
       throw lastErr;
@@ -961,6 +981,11 @@ export default function VoiceTrackDashboard() {
   // nei click/fetch (altrimenti una render intermedia puo' azzerarlo a meta' richiesta).
   const dashFetchSeqRef = useRef(0);
   const dashAbortRef = useRef(null);
+  const dashInFlightRef = useRef(false);
+  // Cache serie settimanali per offset (pager avanti/indietro istantaneo al ritorno).
+  const weekByOffsetRef = useRef(new Map());
+  const weekAbortRef = useRef(null);
+  const [statsWeekLoading, setStatsWeekLoading] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const [targetsOpen, setTargetsOpen] = useState(false);
   const [targetsMounted, setTargetsMounted] = useState(false);
@@ -1018,19 +1043,28 @@ export default function VoiceTrackDashboard() {
 
   const fetchLive = useCallback(async (cfg, silent = false, weekOff) => {
     if (!silent) setStatus('loading');
-    setErrorMsg('');
-    // weekOff esplicito: aggiorna subito il ref (prima del re-render) cosi'
-    // poll/altre fetch non ripartono con l'offset vecchio.
+    // Full dashboard: sempre offset 0 (+ weeks_by_offset prefetch).
+    // Il pager usa fetchWeekOnly / cache, non questo percorso.
     if (weekOff !== undefined) {
       statsWeekOffsetRef.current = weekOff;
     }
-    const off = weekOff !== undefined ? weekOff : statsWeekOffsetRef.current;
+    const off = 0;
+
+    // Poll/refresh silenzioso: non abortire e non accodare se gia' in volo.
+    if (silent && dashInFlightRef.current) {
+      return;
+    }
+
+    if (!silent) setErrorMsg('');
+
     const seq = ++dashFetchSeqRef.current;
     if (dashAbortRef.current) {
       try { dashAbortRef.current.abort(); } catch (e) {}
     }
     const ac = new AbortController();
     dashAbortRef.current = ac;
+    dashInFlightRef.current = true;
+
     try {
       const base = cfg.apiUrl.replace(/\/$/, '');
       const res = await fetchWithRetry(
@@ -1039,26 +1073,29 @@ export default function VoiceTrackDashboard() {
           headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
           signal: ac.signal,
         },
-        { retries: 2, baseDelayMs: 1200 },
+        { retries: 1, baseDelayMs: 900 },
       );
       if (!res.ok) throw new Error(`Risposta ${res.status} dal server`);
       const json = await res.json();
-      // Risposta superata da un fetch piu' recente (o abort): non toccare lo stato.
       if (seq !== dashFetchSeqRef.current) return;
       const loadedTarget = json?.target ?? DEMO_TARGET;
       const nextMeals = json?.oggi?.pasti ?? [];
       const nextWeek = json?.storico_settimanale ?? DEMO_WEEK;
       const nextMonth = json?.storico_mensile ?? DEMO_MONTH;
       const nextYear = json?.storico_annuale ?? DEMO_YEAR;
-      // Confronta col `off` di QUESTA richiesta (non il ref corrente): dopo seq-check
-      // e' la risposta vigente. CF senza campo: applica solo a offset 0.
-      const respOff = json?.week_offset;
-      const weekOk = typeof respOff === 'number'
-        ? respOff === off
-        : off === 0;
+      if (json?.weeks_by_offset && typeof json.weeks_by_offset === 'object') {
+        for (const [k, series] of Object.entries(json.weeks_by_offset)) {
+          if (Array.isArray(series)) weekByOffsetRef.current.set(Number(k), series);
+        }
+      }
+      weekByOffsetRef.current.set(0, nextWeek);
       setMeals(nextMeals);
-      if (weekOk) {
+      // Non sovrascrivere la settimana se l'utente sta sfogliando il passato.
+      if (statsWeekOffsetRef.current === 0) {
         setWeek((prev) => (trendSeriesEqual(prev, nextWeek) ? prev : nextWeek));
+      } else {
+        const cur = weekByOffsetRef.current.get(statsWeekOffsetRef.current);
+        if (cur) setWeek((prev) => (trendSeriesEqual(prev, cur) ? prev : cur));
       }
       setMonth((prev) => (trendSeriesEqual(prev, nextMonth) ? prev : nextMonth));
       setYear((prev) => (trendSeriesEqual(prev, nextYear) ? prev : nextYear));
@@ -1066,22 +1103,10 @@ export default function VoiceTrackDashboard() {
       setTargetDraft((prev) => (targetsOpen ? prev : loadedTarget));
       setStatus('live');
       setLastSync(new Date());
-      // Cache anti cold-start: a offset ≠ 0 non sovrascrivere la week corrente in cache.
       try {
-        let weekForCache = nextWeek;
-        if (!(weekOk && off === 0)) {
-          weekForCache = undefined;
-          try {
-            const prev = await storage.get('vt-cache');
-            if (prev?.value) {
-              const parsed = JSON.parse(prev.value);
-              if (Array.isArray(parsed?.week)) weekForCache = parsed.week;
-            }
-          } catch (e) {}
-        }
         await storage.set('vt-cache', JSON.stringify({
           meals: nextMeals,
-          week: weekForCache ?? nextWeek,
+          week: nextWeek,
           month: nextMonth,
           year: nextYear,
           target: loadedTarget,
@@ -1090,8 +1115,6 @@ export default function VoiceTrackDashboard() {
       } catch (e) {}
     } catch (e) {
       if (e?.name === 'AbortError') return;
-      // In un refresh silenzioso non buttiamo giu' l'app sui dati demo:
-      // teniamo l'ultimo dato buono e segnaliamo solo l'errore.
       if (!silent && seq === dashFetchSeqRef.current) {
         setMeals(DEMO_MEALS_TODAY);
         setWeek(DEMO_WEEK);
@@ -1103,9 +1126,109 @@ export default function VoiceTrackDashboard() {
       if (seq === dashFetchSeqRef.current) {
         setErrorMsg(e.message || 'Impossibile raggiungere il backend');
       }
+    } finally {
+      if (seq === dashFetchSeqRef.current) {
+        dashInFlightRef.current = false;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetsOpen]);
+
+  // Fetch leggero solo-settimana (week_only=1). Non tocca pasti/mese/anno.
+  const fetchWeekOnly = useCallback(async (cfg, off, { showLoading = true } = {}) => {
+    if (!cfg?.apiUrl) return null;
+    if (weekAbortRef.current) {
+      try { weekAbortRef.current.abort(); } catch (e) {}
+    }
+    const ac = new AbortController();
+    weekAbortRef.current = ac;
+    if (showLoading) setStatsWeekLoading(true);
+    try {
+      const base = cfg.apiUrl.replace(/\/$/, '');
+      const res = await fetchWithRetry(
+        `${base}/dashboard?week_offset=${off}&week_only=1`,
+        {
+          headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
+          signal: ac.signal,
+        },
+        { retries: 2, baseDelayMs: 700 },
+      );
+      if (!res.ok) throw new Error(`Risposta ${res.status} dal server`);
+      const json = await res.json();
+      const nextWeek = json?.storico_settimanale;
+      const respOff = json?.week_offset;
+      if (!Array.isArray(nextWeek)) return null;
+      if (typeof respOff === 'number' && Number(respOff) !== Number(off)) return null;
+      weekByOffsetRef.current.set(off, nextWeek);
+      if (statsWeekOffsetRef.current === off) {
+        setWeek((prev) => (trendSeriesEqual(prev, nextWeek) ? prev : nextWeek));
+      }
+      return nextWeek;
+    } catch (e) {
+      if (e?.name === 'AbortError') return null;
+      if (showLoading && statsWeekOffsetRef.current === off) {
+        setErrorMsg(e.message || 'Impossibile caricare la settimana');
+      }
+      return null;
+    } finally {
+      if (weekAbortRef.current === ac) {
+        weekAbortRef.current = null;
+        if (showLoading) setStatsWeekLoading(false);
+      }
+    }
+  }, []);
+
+  const prefetchWeek = useCallback((cfg, off) => {
+    if (!cfg?.apiUrl || off > 0) return;
+    if (weekByOffsetRef.current.has(off)) return;
+    // Fire-and-forget: niente loading UI, non abortisce il pager corrente
+    // (controller separato sarebbe meglio; qui usiamo fetch semplice).
+    const base = cfg.apiUrl.replace(/\/$/, '');
+    fetch(`${base}/dashboard?week_offset=${off}&week_only=1`, {
+      headers: cfg.apiKey ? { 'X-API-Key': cfg.apiKey } : {},
+      cache: 'no-store',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        const series = json?.storico_settimanale;
+        const respOff = json?.week_offset;
+        if (!Array.isArray(series)) return;
+        if (typeof respOff === 'number' && Number(respOff) !== Number(off)) return;
+        weekByOffsetRef.current.set(off, series);
+      })
+      .catch(() => {});
+  }, []);
+
+  const goStatsWeek = useCallback((delta) => {
+    const next = statsWeekOffsetRef.current + delta;
+    if (next > 0) return;
+    statsWeekOffsetRef.current = next;
+    setStatsWeekOffset(next);
+    const cached = weekByOffsetRef.current.get(next);
+    if (cached) {
+      setWeek(cached);
+      setStatsWeekLoading(false);
+      // Prefetch la settimana ancora piu' indietro (o avanti) per il click successivo.
+      if (config.apiUrl) {
+        prefetchWeek(config, next - 1);
+        if (next + 1 <= 0) prefetchWeek(config, next + 1);
+      }
+      return;
+    }
+    if (!config.apiUrl) {
+      setWeek((prev) => {
+        const shifted = shiftWeekSeries(prev, delta * 7);
+        weekByOffsetRef.current.set(next, shifted);
+        return shifted;
+      });
+      return;
+    }
+    // Cache miss: placeholder + fetch leggero week_only.
+    setWeek((prev) => shiftWeekSeries(prev, delta * 7).map((d) => ({ ...d, kcal: 0 })));
+    fetchWeekOnly(config, next, { showLoading: true }).then(() => {
+      prefetchWeek(config, next - 1);
+    });
+  }, [config, fetchWeekOnly, prefetchWeek]);
 
   // Pannello Obiettivi: montato durante exit così altezza/opacità possono chiudersi.
   // Hero a slot fissi (data | medio | gauge): il readout resta nello slot medio e
@@ -1231,7 +1354,10 @@ export default function VoiceTrackDashboard() {
               if (cached && cached.value) {
                 const c = JSON.parse(cached.value);
                 if (Array.isArray(c.meals)) setMeals(c.meals);
-                if (Array.isArray(c.week)) setWeek(c.week);
+                if (Array.isArray(c.week)) {
+                  setWeek(c.week);
+                  weekByOffsetRef.current.set(0, c.week);
+                }
                 if (Array.isArray(c.month)) setMonth(c.month);
                 if (Array.isArray(c.year)) setYear(c.year);
                 if (c.target) setTarget(c.target);
@@ -4110,14 +4236,7 @@ export default function VoiceTrackDashboard() {
               <button
                 type="button"
                 aria-label="Settimana precedente"
-                onClick={() => {
-                  const next = statsWeekOffset - 1;
-                  statsWeekOffsetRef.current = next;
-                  setStatsWeekOffset(next);
-                  // Optimistic: sposta subito le date (label/asse), i kcal arrivano dal fetch.
-                  setWeek((prev) => shiftWeekSeries(prev, -7));
-                  if (config.apiUrl) fetchLive(config, true, next);
-                }}
+                onClick={() => goStatsWeek(-1)}
                 style={{ background: 'transparent', border: 'none', color: C.inkMuted, padding: '4px', cursor: 'pointer', display: 'flex' }}
               >
                 <ChevronLeft size={18} />
@@ -4130,24 +4249,17 @@ export default function VoiceTrackDashboard() {
                   const da = parseYMD(a);
                   const db = parseYMD(b);
                   const MONTH_SHORT = ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
-                  if (da.getMonth() === db.getMonth()) {
-                    return `${da.getDate()}–${db.getDate()} ${MONTH_SHORT[da.getMonth()]}`;
-                  }
-                  return `${da.getDate()} ${MONTH_SHORT[da.getMonth()]} – ${db.getDate()} ${MONTH_SHORT[db.getMonth()]}`;
+                  const range = da.getMonth() === db.getMonth()
+                    ? `${da.getDate()}–${db.getDate()} ${MONTH_SHORT[da.getMonth()]}`
+                    : `${da.getDate()} ${MONTH_SHORT[da.getMonth()]} – ${db.getDate()} ${MONTH_SHORT[db.getMonth()]}`;
+                  return statsWeekLoading ? `${range} · …` : range;
                 })()}
               </span>
               <button
                 type="button"
                 aria-label="Settimana successiva"
                 disabled={statsWeekOffset >= 0}
-                onClick={() => {
-                  if (statsWeekOffset >= 0) return;
-                  const next = statsWeekOffset + 1;
-                  statsWeekOffsetRef.current = next;
-                  setStatsWeekOffset(next);
-                  setWeek((prev) => shiftWeekSeries(prev, 7));
-                  if (config.apiUrl) fetchLive(config, true, next);
-                }}
+                onClick={() => goStatsWeek(1)}
                 style={{
                   background: 'transparent',
                   border: 'none',
@@ -4175,7 +4287,10 @@ export default function VoiceTrackDashboard() {
                   if (r.id !== 'week' && statsWeekOffset !== 0) {
                     statsWeekOffsetRef.current = 0;
                     setStatsWeekOffset(0);
-                    if (config.apiUrl) fetchLive(config, true, 0);
+                    setStatsWeekLoading(false);
+                    const cached0 = weekByOffsetRef.current.get(0);
+                    if (cached0) setWeek(cached0);
+                    // Niente full /dashboard: la week 0 e' in cache; il poll aggiorna.
                   }
                 }}
                 style={{
@@ -4196,7 +4311,7 @@ export default function VoiceTrackDashboard() {
               </button>
             ))}
           </div>
-          <div style={{ height: '124px' }}>
+          <div style={{ height: '124px', opacity: statsWeekLoading && trendRange === 'week' ? 0.45 : 1, transition: 'opacity 120ms ease' }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={trendData} margin={{ top: 16, right: 0, left: 0, bottom: 0 }}>
                 <XAxis
